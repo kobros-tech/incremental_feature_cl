@@ -2,9 +2,10 @@
 
 A standalone research package that tests one hypothesis:
 
-> A continual learner can reduce catastrophic forgetting by incrementally **expanding its discriminative
-> feature space** while **preserving** the previously learned feature space and initialising the
-> contribution of newly added dimensions to **zero**.
+> A continual learner can be given additional discriminative feature capacity incrementally, while the
+> classifier contribution of each new block is initialised to **zero**. This guarantees continuity at the
+> expansion boundary; optional freezing controls can be used when an experiment requires the previously
+> learned representation itself to remain fixed.
 
 **Status: experimental. No claim is made that the method works.** The package establishes (and tests) the
 *mechanism*; whether it helps on Split CIFAR-100 is what the experiments are for.
@@ -97,9 +98,11 @@ exactly `W_new = 0` the gradient w.r.t. the parameters *inside* `psi_new` is zer
 after `W_new` has moved (tested and documented).
 
 **What this is not.** It is an experimental hypothesis, **not a theorem** that zero initialisation solves
-catastrophic forgetting. Invariance holds at the expansion instant only; subsequent training can still
-overwrite old weights (the synthetic demo shows this clearly with plain SGD and no replay). The
-experiments measure *how much* is retained and how much of the new block is used.
+catastrophic forgetting. Zero initialisation guarantees continuity at the expansion instant only. With the
+default trainable-backbone/trainable-old-blocks setting, subsequent optimisation can still change the old
+representation and classifier. For strict stability experiments, use `freeze_backbone=true` and/or
+`freeze_old_blocks=true`; these are explicit controls, not hidden behaviour. Results record the chosen
+settings so an experiment can be audited later.
 
 ## Kernel interpretation
 
@@ -133,9 +136,9 @@ deliberately not implemented. Raw-pixel polynomial expansion on CIFAR (3072 dims
 
 Design choices worth knowing: `psi_t` takes the backbone vector `h` (not the whole `Phi_{t-1}`); one shared
 classifier bias (new blocks have no own bias, so "zero bias" is automatic); the optimizer is **rebuilt at every
-experience** (needed when shapes/params change; same for all variants); `new_feature_dim=0` is the fixed
-baseline; feature growth starts at experience 1; output growth is zero-initialised by default and independent
-of feature growth.
+experience** (needed when shapes/params change; same for all variants); `new_feature_dim=0` is the fixed baseline; feature growth starts at experience 1; output growth is
+zero-initialised by default and independent of feature growth. `freeze_backbone` and `freeze_old_blocks`
+are explicit stability/plasticity controls and default to `false`.
 
 ## Two experiments, deliberately separate
 
@@ -162,7 +165,7 @@ or attach `FeatureExpansionPlugin(policy)` to *any* Avalanche strategy (`Naive`,
 The plugin expands the model at the experience boundary and rebuilds the optimizer. The model is a plain
 `nn.Module` and has no Avalanche imports. Evaluate on `test_stream[: t+1]` (output heads exist only for seen
 classes). Avalanche's `nc_benchmark` (used for `SplitCIFAR100`) needs `n_classes % n_experiences == 0`;
-the built-in streams do not.
+the built-in streams enforce the same divisibility rule.
 
 ## Plots (`<run>/plots/`)
 
@@ -180,10 +183,10 @@ the built-in streams do not.
 ## Result files
 
 `results.json` (config, environment incl. git commit/torch version, class order, per-experience records,
-summary), `metrics.csv`, `per_class_accuracy.csv`, `plots/*.png`. Per experience: feature/param counts, the
-expansion records (`old_feature_dim`, `new_feature_dim`, `number_of_new_parameters`, `old_parameter_count`,
-`total_parameter_count`), probe diagnostics (before expansion / after expansion / after training), per-class
-accuracy, target metrics, block norms, train time. Comparison runs add `comparison.csv/json/png`.
+summary), `metrics.csv`, `per_class_accuracy.csv`, `plots/*.png`. Per experience: feature/parameter counts, `new_parameters_this_experience`,
+`cumulative_added_parameters`, `new_feature_parameters`, `cumulative_added_feature_parameters`, expansion
+records (`old_feature_dim`, `new_feature_dim`, `number_of_new_parameters`, `old_parameter_count`,
+`total_parameter_count`), probe diagnostics, per-class accuracy, target metrics, block norms, and train time. Comparison runs add `comparison.csv/json/png`.
 
 ## Invariants under test (`tests/`)
 
@@ -196,10 +199,11 @@ maths (kernel identity, kernel == feature-space perceptron) - reproducibility, r
 
 ## Known limitations
 
-* **CIFAR-100 runs have not been executed in the development sandbox** (no dataset access). Everything was
-  validated on synthetic data and tiny Avalanche benchmarks; treat all CIFAR behaviour as unverified.
-* Expansion preserves old predictions only at the instant of expansion; with a trainable backbone/old weights,
-  plain training can still forget (expected; compare against `freeze_backbone`, replay, baselines).
+* **CIFAR-100 remains an experiment, not a package self-test.** The repository contains the loader and
+  stream implementation, but no claim of CIFAR-100 performance is encoded in the package.
+* Expansion preserves old logits only at the instant of zero-initialised feature expansion; with trainable
+  old representation parameters, later optimisation can still forget. Freeze controls make the stability
+  choice explicit.
 * The Avalanche backend supports multiclass mode only and lacks the pre/post-expansion probes; iCaRL is not
   wired (needs a feature-extractor/classifier split). No one-vs-rest ensemble, no adaptive `new_dim`, no kernel
   expansion, no data augmentation in the built-in loaders.
