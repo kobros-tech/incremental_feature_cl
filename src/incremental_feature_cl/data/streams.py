@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Deterministic class-incremental and target-vs-rest streams."""
 from __future__ import annotations
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 import numpy as np
 import torch
