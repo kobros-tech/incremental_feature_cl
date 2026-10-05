@@ -29,19 +29,21 @@ def test_synthetic_dataset_and_class_stream():
     }
 
 
-def test_target_stream_repeats_target_and_partitions_negatives():
+def test_target_stream_repeats_target_and_accumulates_negatives():
     train, test = make_synthetic_dataset(
         n_classes=10, n_train_per_class=20, n_test_per_class=10, seed=0
     )
     stream = build_target_vs_rest_stream(train, test, 3, 3, seed=0)
-    all_neg = []
+    seen_neg = set()
     for exp in stream.train:
         assert 3 in exp.classes
         assert int((exp.labels == 3).sum()) == 20
-        neg = sorted(set(exp.labels.tolist()) - {3})
-        assert not set(neg) & set(all_neg)
-        all_neg.extend(neg)
-    assert sorted(all_neg) == [c for c in range(10) if c != 3]
+        neg = set(exp.labels.tolist()) - {3}
+        assert seen_neg.issubset(neg)
+        assert neg - seen_neg
+        seen_neg = neg
+
+    assert seen_neg == {c for c in range(10) if c != 3}
 
 
 def test_invalid_class_split():
