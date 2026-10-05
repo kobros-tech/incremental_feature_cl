@@ -290,6 +290,8 @@ def add_common_args(p: argparse.ArgumentParser, default_dataset: str) -> None:
     p.add_argument("--new-feature-dim", type=int, help="0 = fixed-dimension baseline")
     p.add_argument("--initialization", choices=["zero", "random"])
     p.add_argument("--backbone")
+    p.add_argument("--freeze-backbone", action="store_true")
+    p.add_argument("--freeze-old-blocks", action="store_true")
     p.add_argument("--train-epochs", type=int)
     p.add_argument("--train-mb-size", type=int)
     p.add_argument("--eval-mb-size", type=int)
@@ -309,6 +311,8 @@ _FLAG_TO_KEY = {
     "new_feature_dim": "model.new_feature_dim",
     "initialization": "model.initialization",
     "backbone": "model.backbone",
+    "freeze_backbone": "model.freeze_backbone",
+    "freeze_old_blocks": "model.freeze_old_blocks",
     "train_epochs": "train.train_epochs",
     "train_mb_size": "train.train_mb_size",
     "eval_mb_size": "train.eval_mb_size",
