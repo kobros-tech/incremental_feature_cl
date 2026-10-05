@@ -125,19 +125,24 @@ def build_target_vs_rest_stream(
     if n_experiences > len(negatives):
         raise ValueError("n_experiences cannot exceed the number of negative classes")
 
+    negative_chunks = np.array_split(negatives, n_experiences)
+
     exps = []
-    for i, chunk in enumerate(np.array_split(negatives, n_experiences)):
-        negs = [int(c) for c in chunk.tolist()]
+    seen_negs: list[int] = []
+    for i, chunk in enumerate(negative_chunks):
+        new_negs = [int(c) for c in chunk.tolist()]
+        seen_negs.extend(new_negs)
+
         classes = (
             [target_class] if target_in_every_experience or i == 0 else []
-        ) + negs
-        new_classes = ([target_class] if i == 0 else []) + negs
+        ) + seen_negs
+        new_classes = ([target_class] if i == 0 else []) + new_negs
 
         parts = []
         if target_in_every_experience or i == 0:
             parts.append(_select_classes(train, [target_class]))
-        if negs:
-            parts.append(_select_classes(train, negs))
+        if seen_negs:
+            parts.append(_select_classes(train, seen_negs))
 
         x = torch.cat([p.x for p in parts])
         y = torch.cat([p.targets for p in parts])
