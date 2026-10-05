@@ -128,7 +128,7 @@ deliberately not implemented. Raw-pixel polynomial expansion on CIFAR (3072 dims
 | `training/policy.py` | `ExpansionPolicy`: when/how much to grow (shared by trainer and Avalanche plugin). |
 | `training/trainer.py` | `ContinualTrainer`: probe before expansion -> expand -> probe -> grow outputs -> train -> probe -> evaluate. |
 | `training/replay.py` | Minimal class-balanced buffer for *controlled ablations only* (not a replacement for Avalanche's methods). |
-| `data/` | Datasets (synthetic, CIFAR-10/100), `build_class_incremental_stream`, `build_target_vs_rest_stream`. |
+| `data/` | Committed synthetic/CIFAR loaders, `ArrayDataset`, and deterministic class-incremental/target-vs-rest streams. |
 | `evaluation/` | Per-class accuracy, forgetting, target metrics, `RunResult` (json/csv). |
 | `plotting/` | Plots A-H, regenerated from `results.json`. |
 | `avalanche/` | `FeatureExpansionPlugin`, `IncrementalFeatureSpaceStrategy`, benchmark builders, Avalanche baselines. |
