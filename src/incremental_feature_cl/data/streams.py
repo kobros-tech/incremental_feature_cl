@@ -26,7 +26,7 @@ class Stream:
         self.num_classes, self.class_order, self.target_class = num_classes, class_order, target_class
         self._first = {}
         for exp in train:
-            for c in exp.new_classes: self._first[int(c)] = exp.index
+            for c in exp.new_classes: self._first.setdefault(int(c), exp.index)
     def seen_classes(self, exp_index):
         return [c for c in self.class_order if c in self._first and self._first[c] <= exp_index]
     def seen_negatives(self, exp_index):
@@ -70,9 +70,10 @@ def build_target_vs_rest_stream(train, test, target_class, n_experiences, seed=0
     for i, chunk in enumerate(np.array_split(negatives, n_experiences)):
         negs = [int(c) for c in chunk.tolist()]
         classes = ([target_class] if target_in_every_experience or i == 0 else []) + negs
+        new_classes = ([target_class] if i == 0 else []) + negs
         parts = []
         if target_in_every_experience or i == 0: parts.append(_select_classes(train, [target_class]))
         if negs: parts.append(_select_classes(train, negs))
         x, y = torch.cat([p.x for p in parts]), torch.cat([p.targets for p in parts])
-        exps.append(Experience(i, ArrayDataset(x, y, mean=train.mean, std=train.std), classes, classes.copy()))
+        exps.append(Experience(i, ArrayDataset(x, y, mean=train.mean, std=train.std), classes, new_classes))
     return Stream(exps, test, num_classes, [target_class] + [c for c in order if c != target_class], target_class=target_class)
