@@ -42,18 +42,28 @@ def correctness(
     decisions: np.ndarray, labels: np.ndarray, mode: str, target_class: int | None = None
 ) -> np.ndarray:
     if mode == "target":
-        return decisions == binary_labels(labels, target_class)
+        return decisions == binary_labels(labels, target_class).numpy()
     return decisions == labels
 
 
 def per_class_accuracy(correct: np.ndarray, labels: np.ndarray, num_classes: int) -> np.ndarray:
     """(num_classes,) accuracy; NaN for classes absent from ``labels``."""
-    out = np.full(num_classes, np.nan)
+    correct = np.asarray(correct, dtype=bool)
+    labels = np.asarray(labels)
+    if correct.shape != labels.shape:
+        raise ValueError("correct and labels must have the same shape")
+    if np.any((labels < 0) | (labels >= num_classes)):
+        raise ValueError("labels must be valid class indices")
+    out = np.full(num_classes, np.nan, dtype=float)
     for c in np.unique(labels):
         out[c] = correct[labels == c].mean()
     return out
 
 
 def masked_accuracy(correct: np.ndarray, labels: np.ndarray, classes) -> float:
+    correct = np.asarray(correct, dtype=bool)
+    labels = np.asarray(labels)
+    if correct.shape != labels.shape:
+        raise ValueError("correct and labels must have the same shape")
     m = np.isin(labels, list(classes))
     return float(correct[m].mean()) if m.any() else float("nan")
