@@ -163,8 +163,8 @@ for i, exp in enumerate(benchmark.train_stream):
 ```
 or attach `FeatureExpansionPlugin(policy)` to *any* Avalanche strategy (`Naive`, `Replay`, ...; tested).
 The plugin expands the model at the experience boundary and rebuilds the optimizer. The model is a plain
-`nn.Module` and has no Avalanche imports. Evaluate on `test_stream[: t+1]` (output heads exist only for seen
-classes). Avalanche's `nc_benchmark` (used for `SplitCIFAR100`) needs `n_classes % n_experiences == 0`;
+`nn.Module` and has no Avalanche imports. Evaluate on `test_stream[: t+1]`. The model uses global class IDs, so the output head may already contain
+units for unseen IDs when a high global class ID is first encountered; those units are untrained. Avalanche's `nc_benchmark` (used for `SplitCIFAR100`) needs `n_classes % n_experiences == 0`;
 the built-in streams enforce the same divisibility rule.
 
 ## Plots (`<run>/plots/`)
