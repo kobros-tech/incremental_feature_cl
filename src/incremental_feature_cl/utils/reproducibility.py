@@ -68,6 +68,6 @@ def collect_environment() -> dict[str, Any]:
         try:
             module = __import__(package)
             versions[key] = getattr(module, "__version__", "unknown")
-        except Exception:
+        except (ImportError, OSError, RuntimeError):
             versions[key] = None
     return versions
