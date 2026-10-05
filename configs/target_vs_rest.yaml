@@ -1,0 +1,18 @@
+# Mode A: target class 17 vs every other class encountered so far.
+mode: target
+target_class: 17
+target_in_every_experience: true   # target samples are re-presented in every experience
+seed: 1
+output_dir: results
+data: {dataset: cifar100, root: ./data, n_experiences: 20}
+model:
+  backbone: slimresnet18
+  backbone_kwargs: {nf: 20}
+  new_feature_dim: 16
+  initialization: zero
+train:
+  lr: 0.01
+  train_epochs: 5
+  train_mb_size: 32
+  device: auto
+  pos_weight: balanced     # n_neg / n_pos per experience, compensates the target-vs-rest imbalance

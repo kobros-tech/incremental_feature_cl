@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "incremental-feature-cl"
+version = "0.1.0"
+description = "Incremental feature-space expansion with zero-initialised classifier contributions for continual learning (research package)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Kobros-Tech Ltd" }]
+keywords = ["continual-learning", "catastrophic-forgetting", "feature-maps", "kernels", "avalanche"]
+dependencies = ["numpy>=1.24", "torch>=2.0", "pyyaml>=6.0", "matplotlib>=3.7"]
+
+[project.optional-dependencies]
+vision = ["torchvision>=0.15"]
+avalanche = ["avalanche-lib>=0.6.0", "torchvision>=0.15"]
+dev = ["pytest>=7.0", "ruff>=0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100

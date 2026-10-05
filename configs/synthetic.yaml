@@ -1,0 +1,11 @@
+# Smallest end-to-end run: synthetic data, CPU, seconds.
+mode: multiclass
+backend: torch
+seed: 1
+output_dir: results
+data:
+  dataset: synthetic
+  n_experiences: 5
+  synthetic: {n_classes: 10, n_train_per_class: 40, n_test_per_class: 20}
+model: {backbone: smallconv, new_feature_dim: 8, initialization: zero}
+train: {lr: 0.05, train_epochs: 3, train_mb_size: 16, device: cpu}

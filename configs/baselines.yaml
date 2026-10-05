@@ -1,0 +1,12 @@
+# Base config for compare_baselines / run_sweep.  compare_baselines derives these variants from it:
+#   fixed | fixed+replay | expand-random | expand-zero | expand-zero+replay
+# (replay size via --replay; new_feature_dim here is the 'D' of the expand variants)
+# Reference Avalanche methods:  --avalanche-baselines naive,replay,er_ace,ewc
+# Planned matrix (run_sweep --preset cifar100-matrix):
+#   n_experiences {5,10,20} x new_feature_dim {0,4,16,32} x initialization {zero,random}
+mode: multiclass
+seed: 1
+output_dir: results
+data: {dataset: cifar100, root: ./data, n_experiences: 5}
+model: {backbone: slimresnet18, backbone_kwargs: {nf: 20}, new_feature_dim: 16, initialization: zero}
+train: {lr: 0.01, momentum: 0.9, train_epochs: 5, train_mb_size: 32, device: auto, replay_mem_size: 200}

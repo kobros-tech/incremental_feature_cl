@@ -1,0 +1,25 @@
+# Mode B: class-incremental Split CIFAR-100 (20 experiences x 5 classes).
+mode: multiclass
+backend: torch            # or: avalanche (SplitCIFAR100 + IncrementalFeatureSpaceStrategy)
+seed: 1
+output_dir: results
+data:
+  dataset: cifar100
+  root: ./data
+  n_experiences: 20       # also try 5 and 10 (the Avalanche backend needs 100 % n == 0)
+model:
+  backbone: slimresnet18
+  backbone_kwargs: {nf: 20}
+  new_feature_dim: 16     # 0 = fixed-dimension baseline; try 4, 16, 32
+  initialization: zero    # zero (proposed) | random (control)
+  output_init: zero
+  activation: relu
+train:
+  optimizer: sgd
+  lr: 0.01
+  momentum: 0.9
+  train_epochs: 5
+  train_mb_size: 32
+  eval_mb_size: 256
+  device: auto
+  replay_mem_size: 0
