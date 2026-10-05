@@ -1,7 +1,6 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-import numpy as np
 import pytest
 
 from incremental_feature_cl.data import build_class_incremental_stream, build_target_vs_rest_stream, make_synthetic_dataset
