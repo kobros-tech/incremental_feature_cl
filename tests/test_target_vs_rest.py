@@ -24,13 +24,14 @@ def test_stream_composition(synth):
         assert 3 in e.classes and 3 in set(e.labels.tolist())
         assert (e.labels == 3).sum() == 20  # all target samples every experience
         negs = sorted(set(e.labels.tolist()) - {3})
-        assert not set(negs) & set(all_neg)  # negatives are disjoint across experiences
-        all_neg += negs
-    assert sorted(all_neg) == [
-        c for c in range(10) if c != 3
-    ]  # every non-target class appears once
-    assert st.target_class == 3 and st.seen_negatives(0) != st.seen_negatives(2)
-    assert set(st.seen_negatives(1)) < set(st.seen_negatives(2))  # negative space grows
+        assert set(all_neg).issubset(negs)  # negatives accumulate across experiences
+        new_negs = set(negs) - set(all_neg)
+        assert new_negs  # each experience introduces new negative classes
+        all_neg = negs
+    assert all_neg == [c for c in range(10) if c != 3]
+    assert st.target_class == 3
+    assert set(st.seen_negatives(0)) < set(st.seen_negatives(1))
+    assert set(st.seen_negatives(1)) < set(st.seen_negatives(2))
     assert 3 not in st.seen_negatives(2)
 
 
