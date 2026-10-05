@@ -3,9 +3,13 @@
 
 from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
 
+
 def test_freeze_backbone_disables_backbone_gradients():
-    model = IncrementalFeatureMapModel(build_backbone("smallconv"), num_outputs=2, freeze_backbone=True)
+    model = IncrementalFeatureMapModel(
+        build_backbone("smallconv"), num_outputs=2, freeze_backbone=True
+    )
     assert all(not p.requires_grad for p in model.backbone.parameters())
+
 
 def test_freeze_old_blocks_only_freezes_previous_blocks():
     model = IncrementalFeatureMapModel(
