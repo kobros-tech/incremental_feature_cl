@@ -1,8 +1,6 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-import torch
-
 from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
 
 def test_freeze_backbone_disables_backbone_gradients():
