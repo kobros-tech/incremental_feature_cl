@@ -10,6 +10,8 @@ from typing import Any
 
 import yaml
 
+from ..data.streams import validate_target_to_negatives
+
 
 @dataclass
 class DataConfig:
@@ -53,6 +55,9 @@ class ExperimentConfig:
     mode: str = "multiclass"  # multiclass | target
     target_class: int = 0
     target_in_every_experience: bool = True
+    # target-vs-rest data ratio (targets per negative; 0.2 = 1 target : 5 negatives).
+    # None keeps the whole cumulative negative pool. Controls the data stream, not the loss.
+    target_to_negatives: float | None = None
     backend: str = "torch"  # torch | avalanche
     seed: int = 1
     output_dir: str = "results"
@@ -60,14 +65,22 @@ class ExperimentConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
+    def __post_init__(self) -> None:
+        validate_target_to_negatives(self.target_to_negatives)
+
     def auto_name(self) -> str:
         m, d = self.model, self.data
         init = m.initialization if m.new_feature_dim > 0 else "fixed"
         tgt = f"_t{self.target_class}" if self.mode == "target" else ""
         rep = f"_rep{self.train.replay_mem_size}" if self.train.replay_mem_size else ""
+        ratio = (
+            f"_r{self.target_to_negatives:g}"
+            if self.mode == "target" and self.target_to_negatives is not None
+            else ""
+        )
         return (
             f"{self.mode}{tgt}_{d.dataset}_e{d.n_experiences}_d{m.new_feature_dim}_{init}{rep}"
-            f"_s{self.seed}"
+            f"{ratio}_s{self.seed}"
         )
 
     def to_dict(self) -> dict[str, Any]:

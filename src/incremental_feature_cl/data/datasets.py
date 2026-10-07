@@ -89,9 +89,7 @@ def _load_torchvision(name, root):
     try:
         from torchvision import datasets
     except (ImportError, OSError, RuntimeError) as exc:
-        raise ImportError(
-            "CIFAR datasets require torchvision; install the [vision] extra"
-        ) from exc
+        raise ImportError("CIFAR datasets require torchvision; install the [vision] extra") from exc
 
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -113,6 +111,4 @@ def load_dataset(name, root="./data", seed=0, **synthetic_kwargs):
         return train, test, int(train.targets.max().item()) + 1, tuple(train.x.shape[1:])
     if key in {"cifar10", "cifar100"}:
         return _load_torchvision(key, root)
-    raise ValueError(
-        "unknown dataset {!r}; choose synthetic, cifar10, or cifar100".format(name)
-    )
+    raise ValueError(f"unknown dataset {name!r}; choose synthetic, cifar10, or cifar100")

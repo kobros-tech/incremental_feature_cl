@@ -25,7 +25,7 @@ Skill Memory repositories. Avalanche is an optional integration layer.
 pip install -e .                      # numpy, torch, pyyaml, matplotlib
 pip install -e ".[vision]"            # + torchvision (CIFAR-10/100 download)
 pip install -e ".[avalanche,dev]"     # + avalanche-lib, pytest, ruff
-pytest                                # 50 tests, CPU, ~15 s, no downloads
+pytest                                # CPU, no downloads
 ```
 
 ## Commands
@@ -44,6 +44,11 @@ python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
 # 3. Target class 17 vs the rest, 20 experiences
 python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \
     --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1
+
+# 3b. Same, with an explicit target:negative ratio (0.2 = 1 target : 5 negatives; omit = cumulative negatives)
+python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \\
+    --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 \\
+    --target-to-negatives 0.2
 
 # 4. Full 20-experience class-incremental benchmark (20 x 5 classes)
 python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
@@ -143,12 +148,46 @@ are explicit stability/plasticity controls and default to `false`.
 ## Two experiments, deliberately separate
 
 * **Mode A - target-vs-rest** (`train_target.py`): one binary logit answers "is this class K?". Experience `t`
-  trains on all target samples + the negative classes first introduced in `t` (target data re-appears each
-  experience; `--no-target-in-every-experience` changes that). Earlier negatives are not re-shown (unless replay),
-  but stay in the *evaluation* negative set, so the negative space grows. Loss: BCE with
-  `pos_weight = n_neg / n_pos` of the experience (`train.pos_weight`; set `null` to disable).
+  trains on all target samples + the **cumulative** pool of every negative class introduced so far
+  (`0..t`; target data re-appears each experience, `--no-target-in-every-experience` changes that), so the
+  classifier keeps seeing a growing negative space and the negative/positive ratio grows with `t`. Evaluation
+  uses the same negative set. Loss: BCE with `pos_weight = n_neg / n_pos` of the experience
+  (`train.pos_weight`; set `null` to disable). The data ratio can be controlled explicitly, see below.
 * **Mode B - multiclass class-incremental** (`train_cifar100.py`): standard CIL, softmax head grown as classes
   appear. A binary target classifier is **not** a 100-class classifier; no one-vs-rest ensemble is implemented.
+
+### Target-vs-rest negative ratio (`target_to_negatives`)
+
+An experimental control for studying the effect of cumulative negative imbalance. It sets how many negatives
+accompany the target samples in each training experience; it changes the **data stream only** and never the loss
+(`train.pos_weight` stays as configured, so data ratio and loss weighting can be varied independently).
+
+| `target_to_negatives` | Meaning | Negatives per experience |
+|---|---|---|
+| `None` (default) | cumulative behaviour, no subsampling | the whole pool (grows with `t`) |
+| `1.0` | 1 target : 1 negative | `n_target` |
+| `0.5` | 1 target : 2 negatives | `2 * n_target` |
+| `0.2` | 1 target : 5 negatives | `5 * n_target` |
+| `0.1` | 1 target : 10 negatives | `10 * n_target` |
+| `2.0` | 2 targets : 1 negative | `n_target / 2` |
+
+Rules: the value is *targets per negative*, so `n_negative = floor(n_target / target_to_negatives)`. All target
+samples are always kept (never subsampled or duplicated); negatives are drawn without replacement from the
+cumulative pool, deterministically from `seed` and the experience index; if the pool is smaller than requested
+(early experiences) all of it is kept. With `--no-target-in-every-experience`, experiences without target samples
+keep the whole pool. Non-positive/non-finite values (and ratios so large that zero negatives would be requested)
+raise `ValueError`; the flag is rejected outside target mode. Experiment names get a `_r<ratio>` suffix (e.g.
+`..._r0.2_s1`) when a ratio is set; `None` keeps the previous names. The value is stored in `results.json`.
+
+```bash
+python -m incremental_feature_cl.experiments.train_target --dataset cifar100 --target-class 17 \
+    --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --target-to-negatives 0.2
+# sweep the ratio (null = original cumulative behaviour); prints the plan, needs --yes to run
+python -m incremental_feature_cl.experiments.run_sweep --mode target --target-class 17 --dataset cifar100 \
+    --grid target_to_negatives=null,0.1,0.2,0.5,1 --dry-run
+```
+No ratio is claimed to be optimal; this only makes the ratio an experimental variable. In earlier runs of this
+repository, `0.2` corresponds to the 1:5 behaviour that used to be hardcoded (selected samples are identical).
 
 ## Avalanche integration
 
@@ -193,7 +232,9 @@ records (`old_feature_dim`, `new_feature_dim`, `number_of_new_parameters`, `old_
 Old predictions unchanged after zero expansion (also with BatchNorm backbones and repeated expansions) - new
 weights start at 0 - new weights become non-zero when needed - old parameters keep object identity and values -
 feature dim grows exactly as requested - output dim independent of feature dim (both orders commute) -
-target-vs-rest labels and streams - no label leakage (forward takes only `x`; permuted labels give identical
+target-vs-rest labels and streams (incl. the `target_to_negatives` ratio: None keeps the cumulative pool,
+exact 1:1 / 1:5 / 1:10 / 2:1 counts, targets never subsampled, deterministic and seed-dependent sampling,
+invalid ratios rejected) - no label leakage (forward takes only `x`; permuted labels give identical
 predictions; evaluation never mutates the model) - Avalanche integration on a tiny benchmark - Lecture-6
 maths (kernel identity, kernel == feature-space perceptron) - reproducibility, results format, plots.
 

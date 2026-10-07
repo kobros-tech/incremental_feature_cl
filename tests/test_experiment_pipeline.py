@@ -2,13 +2,19 @@
 # SPDX-License-Identifier: MIT
 """End-to-end tiny runs: preservation record, results format, plots, reproducibility, replay."""
 
+import argparse
 import json
 
 import numpy as np
 import pytest
 
 from incremental_feature_cl.evaluation import RunResult, forgetting_per_class
-from incremental_feature_cl.experiments.common import run_experiment
+from incremental_feature_cl.experiments.common import (
+    add_common_args,
+    config_from_args,
+    estimate_train_samples,
+    run_experiment,
+)
 from incremental_feature_cl.experiments.config import ExperimentConfig, apply_overrides
 from incremental_feature_cl.plotting import make_all_plots
 
@@ -107,3 +113,81 @@ def test_config_overrides_and_validation():
     assert c.model.new_feature_dim == 16 and c.train.lr == 0.1
     with pytest.raises(ValueError):
         ExperimentConfig.from_dict({"nonsense": 1})
+
+
+# --------------------------------------------------------------------------- #
+# target_to_negatives plumbing: config, naming, CLI, end-to-end
+# --------------------------------------------------------------------------- #
+def _parse(argv, mode="target"):
+    p = argparse.ArgumentParser()
+    add_common_args(p, "synthetic")
+    return config_from_args(p.parse_args(argv), mode, "synthetic")
+
+
+def test_ratio_defaults_to_none_and_is_serialised():
+    c = ExperimentConfig()
+    assert c.target_to_negatives is None
+    assert c.to_dict()["target_to_negatives"] is None
+    assert (
+        "target_to_negatives" not in c.to_dict()["train"]
+    )  # data-stream control, not optimiser/loss
+    c2 = ExperimentConfig.from_dict({"mode": "target", "target_to_negatives": 0.2})
+    assert c2.to_dict()["target_to_negatives"] == 0.2
+
+
+@pytest.mark.parametrize("bad", [0, -1, "nan"])
+def test_config_rejects_invalid_ratio(bad):
+    with pytest.raises(ValueError):
+        ExperimentConfig.from_dict({"target_to_negatives": float(bad)})
+
+
+def test_auto_name_distinguishes_ratios_and_keeps_old_name_for_none():
+    def name(ratio, mode="target"):
+        return ExperimentConfig.from_dict(
+            {"mode": mode, "target_class": 17, "target_to_negatives": ratio}
+        ).auto_name()
+
+    base = name(None)
+    assert base == "target_t17_synthetic_e5_d0_fixed_s1"  # unchanged for the default
+    assert name(1) == "target_t17_synthetic_e5_d0_fixed_r1_s1"
+    assert name(0.5).endswith("_r0.5_s1") and name(0.2).endswith("_r0.2_s1")
+    assert len({base, name(1), name(0.5), name(0.2), name(0.1)}) == 5
+    assert "_r" not in name(0.2, mode="multiclass")  # ratio is ignored outside target mode
+
+
+def test_cli_flag_sets_ratio_and_leaves_loss_untouched():
+    assert _parse([]).target_to_negatives is None
+    assert _parse(["--target-to-negatives", "0.2"]).target_to_negatives == 0.2
+    assert _parse(["--target-to-negatives", "1"]).target_to_negatives == 1.0
+    assert _parse(["--target-to-negatives", "10"]).target_to_negatives == 10.0
+    c = _parse(["--target-to-negatives", "0.2"])
+    assert c.train.pos_weight == "balanced"  # the ratio never changes the loss weighting
+    assert _parse(["--set", "target_to_negatives=0.5"]).target_to_negatives == 0.5
+    assert _parse(["--set", "target_to_negatives=null"]).target_to_negatives is None
+    with pytest.raises(ValueError):
+        _parse(["--target-to-negatives", "0"])
+
+
+def test_cli_flag_is_rejected_outside_target_mode():
+    with pytest.raises(ValueError, match="target"):
+        _parse(["--target-to-negatives", "0.2"], mode="multiclass")
+
+
+def test_estimate_reflects_ratio():
+    def est(ratio):
+        c = cfg("target")
+        c.target_to_negatives = ratio
+        return estimate_train_samples(c)
+
+    assert est(1.0) < est(None)  # 16 targets + 16 negatives per experience vs the cumulative pool
+
+
+def test_target_run_with_ratio_records_it_and_changes_name(tmp_path):
+    c = cfg("target", name="")
+    c.target_to_negatives = 0.5
+    r = run_experiment(c, out_dir=tmp_path, verbose=False, make_plots=False)
+    assert r.config["target_to_negatives"] == 0.5
+    assert (
+        json.loads((tmp_path / "results.json").read_text())["config"]["target_to_negatives"] == 0.5
+    )
+    assert c.name.endswith("_r0.5_s1")

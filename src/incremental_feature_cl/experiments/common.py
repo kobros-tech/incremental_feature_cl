@@ -63,6 +63,7 @@ def build_stream(cfg: ExperimentConfig, train, test):
             cfg.seed,
             d.class_order,
             cfg.target_in_every_experience,
+            cfg.target_to_negatives,
         )
     return build_class_incremental_stream(train, test, d.n_experiences, cfg.seed, d.class_order)
 
@@ -301,6 +302,12 @@ def add_common_args(p: argparse.ArgumentParser, default_dataset: str) -> None:
     p.add_argument("--device", help="auto|cpu|cuda")
     p.add_argument("--output-dir")
     p.add_argument("--name")
+    p.add_argument(
+        "--target-to-negatives",
+        type=float,
+        help="target:negative training ratio (target mode only): 0.2 = 1 target : 5 negatives, "
+        "1 = 1:1; omit to keep cumulative negative sampling",
+    )
     p.add_argument("--no-plots", action="store_true")
 
 
@@ -322,6 +329,7 @@ _FLAG_TO_KEY = {
     "device": "train.device",
     "output_dir": "output_dir",
     "name": "name",
+    "target_to_negatives": "target_to_negatives",
 }
 
 
@@ -337,6 +345,8 @@ def config_from_args(args: argparse.Namespace, mode: str, default_dataset: str) 
         for k, v in loaded.items():
             d[k] = {**d[k], **v} if isinstance(v, dict) and isinstance(d.get(k), dict) else v
     d["mode"] = mode
+    if mode != "target" and getattr(args, "target_to_negatives", None) is not None:
+        raise ValueError("--target-to-negatives only applies to target-vs-rest (mode 'target')")
     if args.dataset is None and not in_cfg:
         d["data"]["dataset"] = default_dataset
     flags = [

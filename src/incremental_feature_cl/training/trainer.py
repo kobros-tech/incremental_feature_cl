@@ -215,13 +215,18 @@ class ContinualTrainer:
             rec["num_outputs"] = model.num_outputs
             rec["parameter_count"] = model.parameter_count()
             rec["new_parameters_this_experience"] = (
-                rec["feature_expansion"]["number_of_new_parameters"] if rec["feature_expansion"] else 0
+                rec["feature_expansion"]["number_of_new_parameters"]
+                if rec["feature_expansion"]
+                else 0
             ) + (
-                rec["output_expansion"]["number_of_new_parameters"] if rec["output_expansion"] else 0
+                rec["output_expansion"]["number_of_new_parameters"]
+                if rec["output_expansion"]
+                else 0
             )
-            rec["cumulative_added_parameters"] = sum(
-                r["new_parameters_this_experience"] for r in records
-            ) + rec["new_parameters_this_experience"]
+            rec["cumulative_added_parameters"] = (
+                sum(r["new_parameters_this_experience"] for r in records)
+                + rec["new_parameters_this_experience"]
+            )
             rec["trainable_parameter_count"] = model.parameter_count(trainable_only=True)
             rec["classifier_block_norms"] = model.classifier_block_norms()
             rec["new_block_norm"] = (

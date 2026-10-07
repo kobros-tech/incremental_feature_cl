@@ -2,6 +2,7 @@
 mode: target
 target_class: 17
 target_in_every_experience: true   # target samples are re-presented in every experience
+target_to_negatives: null          # null = keep the whole cumulative negative pool; 0.2 = 1 target : 5 negatives
 seed: 1
 output_dir: results
 data: {dataset: cifar100, root: ./data, n_experiences: 20}
