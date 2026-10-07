@@ -18,10 +18,8 @@ import csv
 import itertools
 from pathlib import Path
 
-import yaml
-
 from .common import add_common_args, config_from_args, estimate_train_samples, run_experiment
-from .config import apply_overrides
+from .config import apply_overrides, parse_override_value
 
 PRESETS = {
     "cifar100-matrix": {
@@ -49,7 +47,7 @@ def main(argv=None) -> None:
     grid = dict(PRESETS[a.preset]) if a.preset else {}
     for g in a.grid:
         k, _, v = g.partition("=")
-        grid[k] = [yaml.safe_load(x) for x in v.split(",")]
+        grid[k] = [parse_override_value(k, x) for x in v.split(",")]
     if not grid:
         p.error("give --preset or at least one --grid")
 

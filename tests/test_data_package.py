@@ -14,7 +14,9 @@ def test_synthetic_dataset_and_class_stream():
     train, test = make_synthetic_dataset(
         n_classes=6, n_train_per_class=4, n_test_per_class=2, seed=3
     )
-    stream = build_class_incremental_stream(train, test, 3, seed=0, class_order=list(range(6)))
+    stream = build_class_incremental_stream(
+        train, test, 3, seed=0, class_order=list(range(6))
+    )
     assert [e.classes for e in stream.train] == [[0, 1], [2, 3], [4, 5]]
     assert stream.seen_classes(1) == [0, 1, 2, 3]
     assert stream.class_first_experience() == {

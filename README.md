@@ -50,6 +50,11 @@ python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \\
     --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 \\
     --target-to-negatives 0.2
 
+# 3c. Sweep the target:negative ratio 5:1 ... 1:5 (+ cumulative reference) for one or more targets
+python -m incremental_feature_cl.experiments.compare_ratios --dataset cifar100 \\
+    --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --yes
+python -m incremental_feature_cl.experiments.compare_ratios --target-class 0 17 50 99 --dry-run
+
 # 4. Full 20-experience class-incremental benchmark (20 x 5 classes)
 python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
     --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1
@@ -189,6 +194,52 @@ python -m incremental_feature_cl.experiments.run_sweep --mode target --target-cl
 No ratio is claimed to be optimal; this only makes the ratio an experimental variable. In earlier runs of this
 repository, `0.2` corresponds to the 1:5 behaviour that used to be hardcoded (selected samples are identical).
 
+### Sweeping the ratio (`compare_ratios`)
+
+Runs the same target-vs-rest experiment once per ratio, for one or more target classes, and summarises
+the trade-off. Ratios are written `target:negative`: `5:1` = 5 targets per negative, `1:5` = 1 target per 5
+negatives. Default grid: `5:1 2:1 1:1 1:2 1:5` plus `cumulative` (the original un-subsampled behaviour) as a
+reference; choose your own with `--ratios 5:1 1:1 1:5` (numbers and `cumulative` also work; `--no-cumulative`
+drops the reference).
+
+```bash
+python -m incremental_feature_cl.experiments.compare_ratios --dataset cifar100 --target-class 17 \
+    --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --dry-run   # plan + sample counts
+... same command with --yes to run it
+... --target-class 0 17 50 99 --yes            # several targets; mean/std across targets are reported
+... --target-class all --yes                   # every class (prints the plan first; large!)
+... --ratios 5:1 1:1 1:5 --pos-weights balanced none --yes
+... --config configs/ratio_sweep.yaml --yes
+```
+
+* **Safe by default:** like `run_sweep`, it prints the plan (runs, training samples per ratio) and only runs
+  with `--yes` (`--dry-run` never runs).
+* **Loss weighting is a confound, so it is an axis.** With the default `train.pos_weight=balanced` the loss
+  gives positives and negatives equal total weight whatever the data ratio, so the sweep then isolates *how
+  many / how varied* the negatives are. `--pos-weights balanced none` runs both settings so the effect of
+  class imbalance in the loss can be separated from the data ratio. The loss is never changed implicitly.
+* **Resumable:** a run whose saved `results.json` has an identical config is reused (`--no-resume`
+  recomputes), so an interrupted CIFAR-100 sweep can be restarted with the same command.
+* **Verifiable:** every experience records `n_train_target` / `n_train_negative`, so the realized ratio is in
+  `results.json`/`metrics.csv` (not only the requested one).
+
+Outputs in `<output-dir>/<name>/` (name defaults to `ratio_sweep_<dataset>_e<n>_d<dim>_<init>_s<seed>`):
+
+| File | Content |
+|---|---|
+| `ratio_sweep_runs.csv` | one row per run: target, ratio, loss weighting, final/average metrics, realized negatives per target |
+| `ratio_sweep_by_ratio.csv` | mean and std across targets for each ratio (and loss setting) |
+| `ratio_sweep.json` | plan, config, environment, both tables |
+| `ratio_sweep_final_metrics.png` | final target recall / negative accuracy, balanced accuracy, F1 / false-positive rate, forgetting vs ratio (thin lines = individual targets) |
+| `ratio_curves.png` | per-experience target recall, negative accuracy and balanced accuracy, one line per ratio (mean over targets); `ratio_curves__pw-<w>.png` per loss setting |
+| `runs/ratio_<r>/target_<k>/` | the normal per-run `results.json`, `metrics.csv`, `per_class_accuracy.csv` (plots only with `--run-plots`; regenerate any time with `python -m incremental_feature_cl.plotting`) |
+
+Metrics: *negative accuracy* is measured on the negative classes seen so far; *balanced accuracy* =
+(target recall + negative accuracy) / 2 (overall binary accuracy depends on the test-set class mix, so use
+balanced accuracy to compare ratios); *recall drop* = max earlier target recall - final target recall.
+The synthetic dataset is a plumbing check only (and the `smallconv` backbone cannot learn it because of global
+pooling; use `--backbone mlp` there); conclusions about ratios need CIFAR-100 runs.
+
 ## Avalanche integration
 
 ```python
@@ -225,7 +276,9 @@ the built-in streams enforce the same divisibility rule.
 summary), `metrics.csv`, `per_class_accuracy.csv`, `plots/*.png`. Per experience: feature/parameter counts, `new_parameters_this_experience`,
 `cumulative_added_parameters`, `new_feature_parameters`, `cumulative_added_feature_parameters`, expansion
 records (`old_feature_dim`, `new_feature_dim`, `number_of_new_parameters`, `old_parameter_count`,
-`total_parameter_count`), probe diagnostics, per-class accuracy, target metrics, block norms, and train time. Comparison runs add `comparison.csv/json/png`.
+`total_parameter_count`), probe diagnostics, `n_train_samples` (and in target mode `n_train_target` / `n_train_negative`, the realized
+training ratio), per-class accuracy, target metrics, block norms, and train time. `metrics.csv` has scalar
+columns only; nested records are flattened (`probe_*`, `feature_expansion_*`). Comparison runs add `comparison.csv/json/png`.
 
 ## Invariants under test (`tests/`)
 
@@ -234,7 +287,8 @@ weights start at 0 - new weights become non-zero when needed - old parameters ke
 feature dim grows exactly as requested - output dim independent of feature dim (both orders commute) -
 target-vs-rest labels and streams (incl. the `target_to_negatives` ratio: None keeps the cumulative pool,
 exact 1:1 / 1:5 / 1:10 / 2:1 counts, targets never subsampled, deterministic and seed-dependent sampling,
-invalid ratios rejected) - no label leakage (forward takes only `x`; permuted labels give identical
+invalid ratios rejected; `compare_ratios`: `a:b` notation, aggregation, realized counts,
+resume, loss-weighting axis, CSV/plot outputs) - no label leakage (forward takes only `x`; permuted labels give identical
 predictions; evaluation never mutates the model) - Avalanche integration on a tiny benchmark - Lecture-6
 maths (kernel identity, kernel == feature-space perceptron) - reproducibility, results format, plots.
 
@@ -250,3 +304,9 @@ maths (kernel identity, kernel == feature-space perceptron) - reproducibility, r
   expansion, no data augmentation in the built-in loaders.
 * The probe subset is drawn from the test set (inputs only) purely for diagnostics; it never influences training.
 * Replay in `training/replay.py` is intentionally simplistic; use Avalanche for real baselines.
+* Target-vs-rest streams hold every experience's training data in memory. The cumulative (`None`) stream for
+  CIFAR-100 with 20 experiences is ~1.6 GB as uint8 (5 exps ~0.5 GB); an explicit ratio such as 1:5 needs
+  ~0.2 GB. Experience subsampling uses `default_rng(seed + experience_index)`: deterministic, and kept this
+  way so earlier 1:5 results reproduce, but `(seed, i)` pairs with equal sums share a stream.
+* The ratio sweep reports mean/std across *targets*; it runs one seed. Repeat with other `--seed` values (and
+  distinct `--name`s) before reading small differences between ratios as real.

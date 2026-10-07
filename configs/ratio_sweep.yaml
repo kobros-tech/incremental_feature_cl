@@ -1,0 +1,21 @@
+# Base config for compare_ratios (target:negative ratio sweep). The sweep sets
+# target_class, target_to_negatives and (optionally) train.pos_weight per run; everything else is used as is.
+#   python -m incremental_feature_cl.experiments.compare_ratios --config configs/ratio_sweep.yaml --yes
+#   add --target-class 0 17 50 99  for several targets;  --pos-weights balanced none  for the loss axis
+mode: target
+target_in_every_experience: true
+seed: 1
+output_dir: results
+data: {dataset: cifar100, root: ./data, n_experiences: 20}
+model:
+  backbone: slimresnet18
+  backbone_kwargs: {nf: 20}
+  new_feature_dim: 16
+  initialization: zero
+train:
+  lr: 0.01
+  momentum: 0.9
+  train_epochs: 5
+  train_mb_size: 32
+  device: auto
+  pos_weight: balanced

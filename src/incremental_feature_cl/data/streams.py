@@ -118,6 +118,35 @@ def validate_target_to_negatives(target_to_negatives: float | None) -> float | N
     return ratio
 
 
+def parse_ratio(text: str) -> float | None:
+    """Parse a target:negative ratio such as ``5:1``, ``1:5``, ``0.2`` or ``cumulative``.
+
+    Returns *targets per negative* (``5:1`` -> 5.0, ``1:5`` -> 0.2) or ``None`` for ``cumulative``/``none``.
+    """
+    t = str(text).strip().lower()
+    if t in {"cumulative", "none", "null"}:
+        return None
+    try:
+        if ":" in t:
+            a, b = t.split(":")
+            value = float(a) / float(b)
+        else:
+            value = float(t)
+    except (ValueError, ZeroDivisionError):
+        raise ValueError(
+            f"cannot parse ratio {text!r}: use 'target:negative' (e.g. 1:5), a number, or 'cumulative'"
+        ) from None
+    return validate_target_to_negatives(value)
+
+
+def format_ratio(target_to_negatives: float | None) -> str:
+    """Human label: ``5.0`` -> ``5:1``, ``0.2`` -> ``1:5``, ``None`` -> ``cumulative``."""
+    if target_to_negatives is None:
+        return "cumulative"
+    r = float(target_to_negatives)
+    return f"{r:.3g}:1" if r >= 1 else f"1:{1 / r:.3g}"
+
+
 def negatives_for_ratio(n_target: int, target_to_negatives: float) -> int:
     """Number of negatives for ``n_target`` targets: ``floor(n_target / ratio)``.
 

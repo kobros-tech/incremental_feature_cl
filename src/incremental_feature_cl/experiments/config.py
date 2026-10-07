@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,19 @@ def _build(cls, d: dict[str, Any]):
     return cls(**kw)
 
 
+_RATIO_NOTATION = re.compile(r"^\s*\d+(\.\d+)?\s*:\s*\d+(\.\d+)?\s*$")
+
+
+def parse_override_value(key: str, raw: str) -> Any:
+    """Parse an override value as YAML, refusing ``a:b`` for ratios (YAML reads ``1:5`` as the int 65)."""
+    if key.split(".")[-1] == "target_to_negatives" and _RATIO_NOTATION.match(raw):
+        raise ValueError(
+            f"{key}={raw}: write the ratio as a number of targets per negative "
+            "(e.g. 0.2 for 1:5, 5 for 5:1); YAML would misread 'a:b'"
+        )
+    return yaml.safe_load(raw)
+
+
 def apply_overrides(d: dict[str, Any], overrides: list[str] | None) -> dict[str, Any]:
     """Apply ``a.b.c=value`` overrides (value parsed as YAML)."""
     for item in overrides or []:
@@ -116,7 +130,7 @@ def apply_overrides(d: dict[str, Any], overrides: list[str] | None) -> dict[str,
         parts = key.split(".")
         for p in parts[:-1]:
             node = node.setdefault(p, {})
-        node[parts[-1]] = yaml.safe_load(raw)
+        node[parts[-1]] = parse_override_value(key, raw)
     return d
 
 
