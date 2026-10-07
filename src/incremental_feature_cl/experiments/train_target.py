@@ -7,6 +7,8 @@
         --train-epochs 5 --seed 1
 
 ``--target-class`` accepts several ids or ``all`` (a full sweep prints an estimate and needs ``--yes``).
+``--target-to-negatives R`` subsamples the cumulative negatives to R targets per negative
+(``0.2`` = 1 target : 5 negatives); omit it to keep all cumulative negatives.
 """
 
 from __future__ import annotations
@@ -54,7 +56,8 @@ def main(argv=None) -> None:
         print(
             f"dataset={cfg.data.dataset} targets={len(targets)} n_experiences={cfg.data.n_experiences} "
             f"epochs={cfg.train.train_epochs} new_feature_dim={cfg.model.new_feature_dim} "
-            f"init={cfg.model.initialization} device={cfg.train.device}"
+            f"init={cfg.model.initialization} target_to_negatives={cfg.target_to_negatives} "
+            f"device={cfg.train.device}"
         )
         print(
             f"runs={len(targets)}  training samples/run~{per_run:,}  total~{per_run * len(targets):,} "

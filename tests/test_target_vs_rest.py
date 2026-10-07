@@ -5,7 +5,12 @@ import pytest
 import torch
 
 from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
-from incremental_feature_cl.data import binary_labels, build_target_vs_rest_stream
+from incremental_feature_cl.data import (
+    binary_labels,
+    build_target_vs_rest_stream,
+    make_synthetic_dataset,
+    negatives_for_ratio,
+)
 from incremental_feature_cl.evaluation import binary_target_metrics
 from incremental_feature_cl.training import ContinualTrainer, ExpansionPolicy, TrainerConfig
 
@@ -24,13 +29,14 @@ def test_stream_composition(synth):
         assert 3 in e.classes and 3 in set(e.labels.tolist())
         assert (e.labels == 3).sum() == 20  # all target samples every experience
         negs = sorted(set(e.labels.tolist()) - {3})
-        assert not set(negs) & set(all_neg)  # negatives are disjoint across experiences
-        all_neg += negs
-    assert sorted(all_neg) == [
-        c for c in range(10) if c != 3
-    ]  # every non-target class appears once
-    assert st.target_class == 3 and st.seen_negatives(0) != st.seen_negatives(2)
-    assert set(st.seen_negatives(1)) < set(st.seen_negatives(2))  # negative space grows
+        assert set(all_neg).issubset(negs)  # negatives accumulate across experiences
+        new_negs = set(negs) - set(all_neg)
+        assert new_negs  # each experience introduces new negative classes
+        all_neg = negs
+    assert all_neg == [c for c in range(10) if c != 3]
+    assert st.target_class == 3
+    assert set(st.seen_negatives(0)) < set(st.seen_negatives(1))
+    assert set(st.seen_negatives(1)) < set(st.seen_negatives(2))
     assert 3 not in st.seen_negatives(2)
 
 
@@ -85,3 +91,145 @@ def test_trainer_in_target_mode(synth):
             assert k in r["target_metrics"]
         assert len(r["per_class_accuracy"]) == 10
         assert r["per_class_accuracy"][3] == pytest.approx(r["target_metrics"]["target_recall"])
+
+
+# --------------------------------------------------------------------------- #
+# target_to_negatives: explicit target:negative sampling ratio
+# --------------------------------------------------------------------------- #
+TARGET = 3
+
+
+@pytest.fixture(scope="module")
+def big():
+    """21 classes x 10 train samples: 10 targets, 5 negative classes (= 50 samples) per experience."""
+    return make_synthetic_dataset(n_classes=21, n_train_per_class=10, n_test_per_class=4, seed=0)
+
+
+def _counts(stream):
+    """[(n_target, n_negative)] per experience."""
+    return [
+        (int((e.labels == TARGET).sum()), int((e.labels != TARGET).sum())) for e in stream.train
+    ]
+
+
+def _big_stream(big, ratio, n_exp=4, seed=0, **kw):
+    train, test = big
+    return build_target_vs_rest_stream(
+        train, test, TARGET, n_exp, seed, target_to_negatives=ratio, **kw
+    )
+
+
+def test_ratio_none_preserves_cumulative_pool(synth):
+    train, test = synth
+    omitted = build_target_vs_rest_stream(train, test, TARGET, 3, seed=0)
+    explicit = build_target_vs_rest_stream(train, test, TARGET, 3, seed=0, target_to_negatives=None)
+    # 20 targets + 20 samples for each of the 3 / 6 / 9 negative classes seen so far
+    assert _counts(omitted) == [(20, 60), (20, 120), (20, 180)]
+    for a, b in zip(omitted.train, explicit.train):
+        assert torch.equal(a.dataset.x, b.dataset.x)
+        assert torch.equal(a.dataset.targets, b.dataset.targets)
+    # exact content/order: target samples first, then every seen negative class in class order
+    for e in omitted.train:
+        negs = sorted(set(e.labels.tolist()) - {TARGET})
+        want = torch.cat(
+            [train.x[train.targets == TARGET]] + [train.x[train.targets == c] for c in negs]
+        )
+        assert torch.equal(e.dataset.x, want)
+
+
+def test_ratio_one_gives_equal_counts(synth):
+    train, test = synth
+    st = build_target_vs_rest_stream(train, test, TARGET, 3, seed=0, target_to_negatives=1.0)
+    assert _counts(st) == [(20, 20)] * 3  # every pool (60/120/180) has >= 20 negatives
+
+
+def test_ratio_point_two_is_one_to_five(big):
+    assert _counts(_big_stream(big, 0.2)) == [(10, 50)] * 4  # pools: 50 / 100 / 150 / 200
+
+
+def test_ratio_point_one_is_one_to_ten(big):
+    # pools are 50 / 100 / 150 / 200: early pools are smaller than requested -> all kept
+    assert _counts(_big_stream(big, 0.1)) == [(10, 50), (10, 100), (10, 100), (10, 100)]
+
+
+def test_ratio_two_is_two_to_one(synth):
+    train, test = synth
+    st = build_target_vs_rest_stream(train, test, TARGET, 3, seed=0, target_to_negatives=2.0)
+    assert _counts(st) == [(20, 10)] * 3  # fewer negatives than targets; targets untouched
+
+
+def test_small_negative_pool_is_kept_whole(big):
+    st = _big_stream(big, 0.01)  # asks for 1000 negatives; at most 200 exist
+    ref = _big_stream(big, None)
+    assert _counts(st) == _counts(ref) == [(10, 50), (10, 100), (10, 150), (10, 200)]
+    for a, b in zip(st.train, ref.train):
+        assert torch.equal(a.dataset.x, b.dataset.x)
+
+
+@pytest.mark.parametrize("ratio", [None, 0.1, 0.2, 1.0, 2.0, 10.0])
+def test_target_samples_are_never_subsampled_or_duplicated(big, ratio):
+    train, _ = big
+    want = train.x[train.targets == TARGET]
+    for e in _big_stream(big, ratio).train:
+        got = e.dataset.x[e.dataset.targets == TARGET]
+        assert torch.equal(got, want)
+
+
+def test_ratio_subsample_is_drawn_without_replacement_from_cumulative_pool(big):
+    train, _ = big
+    st = _big_stream(big, 0.2)
+    for e in st.train:
+        neg = e.dataset.x[e.dataset.targets != TARGET]
+        assert len(torch.unique(neg.flatten(1), dim=0)) == len(neg)  # no duplicates
+        assert set(e.labels.tolist()) - {TARGET} <= set(st.seen_negatives(e.index))
+        pool = train.x[torch.isin(train.targets, torch.tensor(st.seen_negatives(e.index)))]
+        assert len(neg) <= len(pool)
+    # experiences >= 1 draw from classes introduced earlier too (cumulative, not just new classes)
+    assert set(st.train[3].labels.tolist()) - {TARGET} > set(st.train[3].new_classes)
+
+
+def test_ratio_sampling_is_deterministic_for_same_seed(big):
+    a, b = _big_stream(big, 0.2, seed=5), _big_stream(big, 0.2, seed=5)
+    for x, y in zip(a.train, b.train):
+        assert torch.equal(x.dataset.x, y.dataset.x)
+        assert torch.equal(x.dataset.targets, y.dataset.targets)
+
+
+def test_ratio_sampling_changes_with_seed(big):
+    order = list(range(21))  # fix the class order so only the sampling seed differs
+    a = _big_stream(big, 0.2, seed=0, class_order=order)
+    b = _big_stream(big, 0.2, seed=1, class_order=order)
+    # experience 3 draws 50 of 200 negatives: different seeds give different draws
+    assert a.train[3].classes == b.train[3].classes
+    assert not torch.equal(a.train[3].dataset.x, b.train[3].dataset.x)
+
+
+@pytest.mark.parametrize("bad", [0, 0.0, -1, -0.5, float("nan"), float("inf")])
+def test_non_positive_or_non_finite_ratio_raises(synth, bad):
+    train, test = synth
+    with pytest.raises(ValueError):
+        build_target_vs_rest_stream(train, test, TARGET, 3, target_to_negatives=bad)
+
+
+def test_ratio_requesting_zero_negatives_raises(synth):
+    train, test = synth
+    with pytest.raises(ValueError, match="negatives"):
+        build_target_vs_rest_stream(train, test, TARGET, 3, target_to_negatives=1000.0)
+
+
+def test_negatives_for_ratio_is_floor_with_float_guard():
+    assert negatives_for_ratio(500, 0.2) == 2500
+    assert negatives_for_ratio(20, 0.1) == 200
+    assert negatives_for_ratio(29, 0.29) == 100  # 29 / 0.29 = 99.99999999999999 in floats
+    assert negatives_for_ratio(7, 2.0) == 3  # floor, never rounds up
+
+
+def test_ratio_with_target_only_in_first_experience(big):
+    st = _big_stream(big, 0.2, target_in_every_experience=False)
+    assert st.train[0].classes[0] == TARGET and _counts(st)[0] == (10, 50)
+    for e in st.train[1:]:
+        assert TARGET not in set(e.labels.tolist())  # no target -> no ratio to enforce
+    # negatives are still the whole cumulative pool there
+    assert [c[1] for c in _counts(st)[1:]] == [100, 150, 200]
+    ref = _big_stream(big, None, target_in_every_experience=False)
+    assert [c[1] for c in _counts(ref)] == [50, 100, 150, 200]

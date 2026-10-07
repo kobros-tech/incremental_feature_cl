@@ -2,9 +2,10 @@
 
 A standalone research package that tests one hypothesis:
 
-> A continual learner can reduce catastrophic forgetting by incrementally **expanding its discriminative
-> feature space** while **preserving** the previously learned feature space and initialising the
-> contribution of newly added dimensions to **zero**.
+> A continual learner can be given additional discriminative feature capacity incrementally, while the
+> classifier contribution of each new block is initialised to **zero**. This guarantees continuity at the
+> expansion boundary; optional freezing controls can be used when an experiment requires the previously
+> learned representation itself to remain fixed.
 
 **Status: experimental. No claim is made that the method works.** The package establishes (and tests) the
 *mechanism*; whether it helps on Split CIFAR-100 is what the experiments are for.
@@ -24,7 +25,7 @@ Skill Memory repositories. Avalanche is an optional integration layer.
 pip install -e .                      # numpy, torch, pyyaml, matplotlib
 pip install -e ".[vision]"            # + torchvision (CIFAR-10/100 download)
 pip install -e ".[avalanche,dev]"     # + avalanche-lib, pytest, ruff
-pytest                                # 50 tests, CPU, ~15 s, no downloads
+pytest                                # CPU, no downloads
 ```
 
 ## Commands
@@ -43,6 +44,11 @@ python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
 # 3. Target class 17 vs the rest, 20 experiences
 python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \
     --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1
+
+# 3b. Same, with an explicit target:negative ratio (0.2 = 1 target : 5 negatives; omit = cumulative negatives)
+python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \\
+    --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 \\
+    --target-to-negatives 0.2
 
 # 4. Full 20-experience class-incremental benchmark (20 x 5 classes)
 python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
@@ -97,9 +103,11 @@ exactly `W_new = 0` the gradient w.r.t. the parameters *inside* `psi_new` is zer
 after `W_new` has moved (tested and documented).
 
 **What this is not.** It is an experimental hypothesis, **not a theorem** that zero initialisation solves
-catastrophic forgetting. Invariance holds at the expansion instant only; subsequent training can still
-overwrite old weights (the synthetic demo shows this clearly with plain SGD and no replay). The
-experiments measure *how much* is retained and how much of the new block is used.
+catastrophic forgetting. Zero initialisation guarantees continuity at the expansion instant only. With the
+default trainable-backbone/trainable-old-blocks setting, subsequent optimisation can still change the old
+representation and classifier. For strict stability experiments, use `freeze_backbone=true` and/or
+`freeze_old_blocks=true`; these are explicit controls, not hidden behaviour. Results record the chosen
+settings so an experiment can be audited later.
 
 ## Kernel interpretation
 
@@ -125,7 +133,7 @@ deliberately not implemented. Raw-pixel polynomial expansion on CIFAR (3072 dims
 | `training/policy.py` | `ExpansionPolicy`: when/how much to grow (shared by trainer and Avalanche plugin). |
 | `training/trainer.py` | `ContinualTrainer`: probe before expansion -> expand -> probe -> grow outputs -> train -> probe -> evaluate. |
 | `training/replay.py` | Minimal class-balanced buffer for *controlled ablations only* (not a replacement for Avalanche's methods). |
-| `data/` | Datasets (synthetic, CIFAR-10/100), `build_class_incremental_stream`, `build_target_vs_rest_stream`. |
+| `data/` | Committed synthetic/CIFAR loaders, `ArrayDataset`, and deterministic class-incremental/target-vs-rest streams. |
 | `evaluation/` | Per-class accuracy, forgetting, target metrics, `RunResult` (json/csv). |
 | `plotting/` | Plots A-H, regenerated from `results.json`. |
 | `avalanche/` | `FeatureExpansionPlugin`, `IncrementalFeatureSpaceStrategy`, benchmark builders, Avalanche baselines. |
@@ -133,19 +141,53 @@ deliberately not implemented. Raw-pixel polynomial expansion on CIFAR (3072 dims
 
 Design choices worth knowing: `psi_t` takes the backbone vector `h` (not the whole `Phi_{t-1}`); one shared
 classifier bias (new blocks have no own bias, so "zero bias" is automatic); the optimizer is **rebuilt at every
-experience** (needed when shapes/params change; same for all variants); `new_feature_dim=0` is the fixed
-baseline; feature growth starts at experience 1; output growth is zero-initialised by default and independent
-of feature growth.
+experience** (needed when shapes/params change; same for all variants); `new_feature_dim=0` is the fixed baseline; feature growth starts at experience 1; output growth is
+zero-initialised by default and independent of feature growth. `freeze_backbone` and `freeze_old_blocks`
+are explicit stability/plasticity controls and default to `false`.
 
 ## Two experiments, deliberately separate
 
 * **Mode A - target-vs-rest** (`train_target.py`): one binary logit answers "is this class K?". Experience `t`
-  trains on all target samples + the negative classes first introduced in `t` (target data re-appears each
-  experience; `--no-target-in-every-experience` changes that). Earlier negatives are not re-shown (unless replay),
-  but stay in the *evaluation* negative set, so the negative space grows. Loss: BCE with
-  `pos_weight = n_neg / n_pos` of the experience (`train.pos_weight`; set `null` to disable).
+  trains on all target samples + the **cumulative** pool of every negative class introduced so far
+  (`0..t`; target data re-appears each experience, `--no-target-in-every-experience` changes that), so the
+  classifier keeps seeing a growing negative space and the negative/positive ratio grows with `t`. Evaluation
+  uses the same negative set. Loss: BCE with `pos_weight = n_neg / n_pos` of the experience
+  (`train.pos_weight`; set `null` to disable). The data ratio can be controlled explicitly, see below.
 * **Mode B - multiclass class-incremental** (`train_cifar100.py`): standard CIL, softmax head grown as classes
   appear. A binary target classifier is **not** a 100-class classifier; no one-vs-rest ensemble is implemented.
+
+### Target-vs-rest negative ratio (`target_to_negatives`)
+
+An experimental control for studying the effect of cumulative negative imbalance. It sets how many negatives
+accompany the target samples in each training experience; it changes the **data stream only** and never the loss
+(`train.pos_weight` stays as configured, so data ratio and loss weighting can be varied independently).
+
+| `target_to_negatives` | Meaning | Negatives per experience |
+|---|---|---|
+| `None` (default) | cumulative behaviour, no subsampling | the whole pool (grows with `t`) |
+| `1.0` | 1 target : 1 negative | `n_target` |
+| `0.5` | 1 target : 2 negatives | `2 * n_target` |
+| `0.2` | 1 target : 5 negatives | `5 * n_target` |
+| `0.1` | 1 target : 10 negatives | `10 * n_target` |
+| `2.0` | 2 targets : 1 negative | `n_target / 2` |
+
+Rules: the value is *targets per negative*, so `n_negative = floor(n_target / target_to_negatives)`. All target
+samples are always kept (never subsampled or duplicated); negatives are drawn without replacement from the
+cumulative pool, deterministically from `seed` and the experience index; if the pool is smaller than requested
+(early experiences) all of it is kept. With `--no-target-in-every-experience`, experiences without target samples
+keep the whole pool. Non-positive/non-finite values (and ratios so large that zero negatives would be requested)
+raise `ValueError`; the flag is rejected outside target mode. Experiment names get a `_r<ratio>` suffix (e.g.
+`..._r0.2_s1`) when a ratio is set; `None` keeps the previous names. The value is stored in `results.json`.
+
+```bash
+python -m incremental_feature_cl.experiments.train_target --dataset cifar100 --target-class 17 \
+    --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --target-to-negatives 0.2
+# sweep the ratio (null = original cumulative behaviour); prints the plan, needs --yes to run
+python -m incremental_feature_cl.experiments.run_sweep --mode target --target-class 17 --dataset cifar100 \
+    --grid target_to_negatives=null,0.1,0.2,0.5,1 --dry-run
+```
+No ratio is claimed to be optimal; this only makes the ratio an experimental variable. In earlier runs of this
+repository, `0.2` corresponds to the 1:5 behaviour that used to be hardcoded (selected samples are identical).
 
 ## Avalanche integration
 
@@ -160,9 +202,9 @@ for i, exp in enumerate(benchmark.train_stream):
 ```
 or attach `FeatureExpansionPlugin(policy)` to *any* Avalanche strategy (`Naive`, `Replay`, ...; tested).
 The plugin expands the model at the experience boundary and rebuilds the optimizer. The model is a plain
-`nn.Module` and has no Avalanche imports. Evaluate on `test_stream[: t+1]` (output heads exist only for seen
-classes). Avalanche's `nc_benchmark` (used for `SplitCIFAR100`) needs `n_classes % n_experiences == 0`;
-the built-in streams do not.
+`nn.Module` and has no Avalanche imports. Evaluate on `test_stream[: t+1]`. The model uses global class IDs, so the output head may already contain
+units for unseen IDs when a high global class ID is first encountered; those units are untrained. Avalanche's `nc_benchmark` (used for `SplitCIFAR100`) needs `n_classes % n_experiences == 0`;
+the built-in streams enforce the same divisibility rule.
 
 ## Plots (`<run>/plots/`)
 
@@ -180,26 +222,29 @@ the built-in streams do not.
 ## Result files
 
 `results.json` (config, environment incl. git commit/torch version, class order, per-experience records,
-summary), `metrics.csv`, `per_class_accuracy.csv`, `plots/*.png`. Per experience: feature/param counts, the
-expansion records (`old_feature_dim`, `new_feature_dim`, `number_of_new_parameters`, `old_parameter_count`,
-`total_parameter_count`), probe diagnostics (before expansion / after expansion / after training), per-class
-accuracy, target metrics, block norms, train time. Comparison runs add `comparison.csv/json/png`.
+summary), `metrics.csv`, `per_class_accuracy.csv`, `plots/*.png`. Per experience: feature/parameter counts, `new_parameters_this_experience`,
+`cumulative_added_parameters`, `new_feature_parameters`, `cumulative_added_feature_parameters`, expansion
+records (`old_feature_dim`, `new_feature_dim`, `number_of_new_parameters`, `old_parameter_count`,
+`total_parameter_count`), probe diagnostics, per-class accuracy, target metrics, block norms, and train time. Comparison runs add `comparison.csv/json/png`.
 
 ## Invariants under test (`tests/`)
 
 Old predictions unchanged after zero expansion (also with BatchNorm backbones and repeated expansions) - new
 weights start at 0 - new weights become non-zero when needed - old parameters keep object identity and values -
 feature dim grows exactly as requested - output dim independent of feature dim (both orders commute) -
-target-vs-rest labels and streams - no label leakage (forward takes only `x`; permuted labels give identical
+target-vs-rest labels and streams (incl. the `target_to_negatives` ratio: None keeps the cumulative pool,
+exact 1:1 / 1:5 / 1:10 / 2:1 counts, targets never subsampled, deterministic and seed-dependent sampling,
+invalid ratios rejected) - no label leakage (forward takes only `x`; permuted labels give identical
 predictions; evaluation never mutates the model) - Avalanche integration on a tiny benchmark - Lecture-6
 maths (kernel identity, kernel == feature-space perceptron) - reproducibility, results format, plots.
 
 ## Known limitations
 
-* **CIFAR-100 runs have not been executed in the development sandbox** (no dataset access). Everything was
-  validated on synthetic data and tiny Avalanche benchmarks; treat all CIFAR behaviour as unverified.
-* Expansion preserves old predictions only at the instant of expansion; with a trainable backbone/old weights,
-  plain training can still forget (expected; compare against `freeze_backbone`, replay, baselines).
+* **CIFAR-100 remains an experiment, not a package self-test.** The repository contains the loader and
+  stream implementation, but no claim of CIFAR-100 performance is encoded in the package.
+* Expansion preserves old logits only at the instant of zero-initialised feature expansion; with trainable
+  old representation parameters, later optimisation can still forget. Freeze controls make the stability
+  choice explicit.
 * The Avalanche backend supports multiclass mode only and lacks the pre/post-expansion probes; iCaRL is not
   wired (needs a feature-extractor/classifier split). No one-vs-rest ensemble, no adaptive `new_dim`, no kernel
   expansion, no data augmentation in the built-in loaders.

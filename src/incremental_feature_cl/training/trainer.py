@@ -153,6 +153,7 @@ class ContinualTrainer:
             policy.single_output = True
             assert model.num_outputs == 1, "target mode needs a model with exactly one output"
         records: list[dict[str, Any]] = []
+        cumulative_feature_parameters = 0
         for exp in stream.train:
             t0 = time.time()
             seen_before = stream.seen_classes(exp.index - 1) if exp.index > 0 else []
@@ -170,6 +171,9 @@ class ContinualTrainer:
             frec = policy.expand_features(model, exp.index)
             after = self._probe_logits(probe_x) if probe_x is not None else None
             rec["feature_expansion"] = frec.to_dict() if frec else None
+            rec["new_feature_parameters"] = frec.number_of_new_parameters if frec else 0
+            cumulative_feature_parameters += rec["new_feature_parameters"]
+            rec["cumulative_added_feature_parameters"] = cumulative_feature_parameters
             rec["feature_dim_before_expansion"] = old_dim
 
             # (4) output growth (independent of the above)
@@ -210,6 +214,19 @@ class ContinualTrainer:
             rec["block_dims"] = model.block_dims
             rec["num_outputs"] = model.num_outputs
             rec["parameter_count"] = model.parameter_count()
+            rec["new_parameters_this_experience"] = (
+                rec["feature_expansion"]["number_of_new_parameters"]
+                if rec["feature_expansion"]
+                else 0
+            ) + (
+                rec["output_expansion"]["number_of_new_parameters"]
+                if rec["output_expansion"]
+                else 0
+            )
+            rec["cumulative_added_parameters"] = (
+                sum(r["new_parameters_this_experience"] for r in records)
+                + rec["new_parameters_this_experience"]
+            )
             rec["trainable_parameter_count"] = model.parameter_count(trainable_only=True)
             rec["classifier_block_norms"] = model.classifier_block_norms()
             rec["new_block_norm"] = (

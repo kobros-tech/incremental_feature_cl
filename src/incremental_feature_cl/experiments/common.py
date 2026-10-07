@@ -63,6 +63,7 @@ def build_stream(cfg: ExperimentConfig, train, test):
             cfg.seed,
             d.class_order,
             cfg.target_in_every_experience,
+            cfg.target_to_negatives,
         )
     return build_class_incremental_stream(train, test, d.n_experiences, cfg.seed, d.class_order)
 
@@ -290,6 +291,8 @@ def add_common_args(p: argparse.ArgumentParser, default_dataset: str) -> None:
     p.add_argument("--new-feature-dim", type=int, help="0 = fixed-dimension baseline")
     p.add_argument("--initialization", choices=["zero", "random"])
     p.add_argument("--backbone")
+    p.add_argument("--freeze-backbone", action="store_true", default=None)
+    p.add_argument("--freeze-old-blocks", action="store_true", default=None)
     p.add_argument("--train-epochs", type=int)
     p.add_argument("--train-mb-size", type=int)
     p.add_argument("--eval-mb-size", type=int)
@@ -299,6 +302,12 @@ def add_common_args(p: argparse.ArgumentParser, default_dataset: str) -> None:
     p.add_argument("--device", help="auto|cpu|cuda")
     p.add_argument("--output-dir")
     p.add_argument("--name")
+    p.add_argument(
+        "--target-to-negatives",
+        type=float,
+        help="target:negative training ratio (target mode only): 0.2 = 1 target : 5 negatives, "
+        "1 = 1:1; omit to keep cumulative negative sampling",
+    )
     p.add_argument("--no-plots", action="store_true")
 
 
@@ -309,6 +318,8 @@ _FLAG_TO_KEY = {
     "new_feature_dim": "model.new_feature_dim",
     "initialization": "model.initialization",
     "backbone": "model.backbone",
+    "freeze_backbone": "model.freeze_backbone",
+    "freeze_old_blocks": "model.freeze_old_blocks",
     "train_epochs": "train.train_epochs",
     "train_mb_size": "train.train_mb_size",
     "eval_mb_size": "train.eval_mb_size",
@@ -318,6 +329,7 @@ _FLAG_TO_KEY = {
     "device": "train.device",
     "output_dir": "output_dir",
     "name": "name",
+    "target_to_negatives": "target_to_negatives",
 }
 
 
@@ -333,6 +345,8 @@ def config_from_args(args: argparse.Namespace, mode: str, default_dataset: str) 
         for k, v in loaded.items():
             d[k] = {**d[k], **v} if isinstance(v, dict) and isinstance(d.get(k), dict) else v
     d["mode"] = mode
+    if mode != "target" and getattr(args, "target_to_negatives", None) is not None:
+        raise ValueError("--target-to-negatives only applies to target-vs-rest (mode 'target')")
     if args.dataset is None and not in_cfg:
         d["data"]["dataset"] = default_dataset
     flags = [

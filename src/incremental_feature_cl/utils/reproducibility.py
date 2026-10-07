@@ -55,7 +55,7 @@ def collect_environment() -> dict[str, Any]:
     """Provenance record stored next to every result."""
     from .. import __version__
 
-    return {
+    versions = {
         "package_version": __version__,
         "git_commit": get_git_commit(),
         "python": platform.python_version(),
@@ -64,3 +64,10 @@ def collect_environment() -> dict[str, Any]:
         "platform": platform.platform(),
         "cuda_available": torch.cuda.is_available(),
     }
+    for package, key in (("torchvision", "torchvision"), ("avalanche", "avalanche")):
+        try:
+            module = __import__(package)
+            versions[key] = getattr(module, "__version__", "unknown")
+        except (ImportError, OSError, RuntimeError):
+            versions[key] = None
+    return versions
