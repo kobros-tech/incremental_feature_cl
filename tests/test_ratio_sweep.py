@@ -355,16 +355,28 @@ def test_peak_to_final_drop_is_measured_from_the_peak_not_the_last_dip(tmp_path)
     assert run_metrics(r)["target_recall_peak_to_final_drop"] == pytest.approx(0.9 - 0.8)
 
 
-def test_resume_ignores_name_output_dir_and_dataset_root(tmp_path):
+def test_resume_config_storage_vs_dataset_identity(tmp_path):
     from incremental_feature_cl.experiments.compare_ratios import _same_config
 
     compare_ratios.main(sweep_args(tmp_path, "--yes", targets=("0",), ratios=("1:1",)))
     cfg = _run(tmp_path / "sw", "ratio_1to1", 0).config
+
     moved = json.loads(json.dumps(cfg))
-    moved["name"], moved["output_dir"], moved["data"]["root"] = "other", "/elsewhere", "/mnt/d"
-    assert _same_config(cfg, moved)  # where a run lives is not a scientific change
-    for path, value in ((("train", "lr"), 0.5), (("seed",), 9), (("target_to_negatives",), 0.5),
-                        (("train", "pos_weight"), None), (("target_class",), 1)):  # fmt: skip
+    moved["name"] = "different-name"
+    moved["output_dir"] = "/different/output"
+    assert _same_config(cfg, moved)
+
+    moved = json.loads(json.dumps(cfg))
+    moved["data"]["root"] = "/mnt/d"
+    assert not _same_config(cfg, moved)
+
+    for path, value in (
+        (("train", "lr"), 0.5),
+        (("seed",), 9),
+        (("target_to_negatives",), 0.5),
+        (("train", "pos_weight"), None),
+        (("target_class",), 1),
+    ):  # fmt: skip
         changed = json.loads(json.dumps(cfg))
         node = changed
         for key in path[:-1]:

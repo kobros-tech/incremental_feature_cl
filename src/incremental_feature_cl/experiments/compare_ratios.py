@@ -113,7 +113,7 @@ RATIO_SEMANTICS = (
 
 # Bookkeeping that cannot change a result: where/under which name a run was stored. (Everything
 # that influences training -- lr, seed, ratio, target, loss weighting, model, data, device -- stays.)
-_NON_SCIENTIFIC = (("name",), ("output_dir",), ("data", "root"))
+_NON_SCIENTIFIC = (("name",), ("output_dir",))
 
 
 def _comparable(cfg: dict, drop: tuple[tuple[str, ...], ...] = _NON_SCIENTIFIC) -> dict:
