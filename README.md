@@ -14,7 +14,7 @@ Theory: [MIT 6.86x Lecture 6](https://github.com/kobros-tech/6.86x/tree/2025/uni
 kernels, kernel perceptron). Architecture is inspired by (but does **not** depend on) the OCL Survey and
 Skill Memory repositories. Avalanche is an optional integration layer.
 
-```
+```text
 6.86x maths -> math/ (feature maps, kernels, perceptron) -> models/ (expandable feature model)
             -> training/ (plain PyTorch)  ->  avalanche/ (optional adapter) -> Split CIFAR-100
 ```
@@ -77,6 +77,7 @@ python -m incremental_feature_cl.experiments.train_target --target-class all --d
 # Regenerate plots from a saved result, no retraining
 python -m incremental_feature_cl.plotting --results results/<run>/results.json
 ```
+
 Every script takes `--config configs/*.yaml`, any `--set section.key=value`, `--device auto|cpu|cuda`.
 Run order recommended: synthetic -> CIFAR-10/small subset -> CIFAR-100 x5 -> x20 -> zero vs random -> baselines.
 
@@ -86,19 +87,19 @@ Run order recommended: synthetic -> CIFAR-10/small subset -> CIFAR-100 x5 -> x20
 Apply a feature map `x -> Phi(x) = (x, x^2)` and the *same* linear machinery works: the decision
 `theta . Phi(x) + b >= 0` is linear in feature space and nonlinear in `x`.
 
-```
+```text
 x  ->  Phi(x)  ->  linear classifier  f(x) = W Phi(x) + b
 ```
 
 **Incremental expansion.** Instead of a fixed `Phi`, grow it by appending a block:
 
-```
+```text
 Phi_{t+1}(x) = [ Phi_t(x) , psi_{t+1}(x) ]          W_{t+1} = [ W_t , 0 ]
 ```
 
 Then, immediately after expansion and before any optimisation step,
 
-```
+```text
 f_{t+1}(x) = W_t Phi_t(x) + 0 * psi_{t+1}(x) + b = f_t(x)        for every x
 ```
 
@@ -131,7 +132,7 @@ deliberately not implemented. Raw-pixel polynomial expansion on CIFAR (3072 dims
 ## Model components (`src/incremental_feature_cl`)
 
 | Module | Role |
-|---|---|
+| --- | --- |
 | `math/` | Reference maths: `PolynomialFeatureMap`, kernels, `Perceptron` (expandable), `KernelPerceptron`. |
 | `models/feature_map.py` | `FeatureBlock`: `psi(h) = act(Linear(h))` on the backbone vector `h` (own params random). |
 | `models/classifier.py` | `ExpandableLinearClassifier`: `logits = b + sum_k W_k phi_k`. `add_block` (feature axis) and `expand_outputs` (class axis) are independent. |
@@ -170,7 +171,7 @@ accompany the target samples in each training experience; it changes the **data 
 (`train.pos_weight` stays as configured, so data ratio and loss weighting can be varied independently).
 
 | `target_to_negatives` | Meaning | Negatives per experience |
-|---|---|---|
+| --- | --- | --- |
 | `None` (default) | cumulative behaviour, no subsampling | the whole pool (grows with `t`) |
 | `1.0` | 1 target : 1 negative | `n_target` |
 | `0.5` | 1 target : 2 negatives | `2 * n_target` |
@@ -205,6 +206,7 @@ python -m incremental_feature_cl.experiments.train_target --dataset cifar100 --t
 python -m incremental_feature_cl.experiments.run_sweep --mode target --target-class 17 --dataset cifar100 \
     --grid target_to_negatives=null,0.1,0.2,0.5,1 --dry-run
 ```
+
 No ratio is claimed to be optimal; this only makes the ratio an experimental variable. In earlier runs of this
 repository, `0.2` corresponds to the 1:5 behaviour that used to be hardcoded (selected samples are identical).
 
@@ -239,8 +241,8 @@ python -m incremental_feature_cl.experiments.compare_ratios --dataset cifar100 -
   run directory name, so it can never overwrite the `balanced` runs. The loss is never changed implicitly.
 * **Resumable:** a run whose saved `results.json` has an identical config is reused (`--no-resume`
   recomputes), so an interrupted CIFAR-100 sweep can be restarted with the same command. Everything that
-  influences training (lr, seed, ratio, target, loss weighting, model, data, device, ...) is compared; where a
-  run is stored (`name`, `output_dir`, `data.root`) is not, so a moved sweep is not recomputed. A run that is
+  influences training (lr, seed, ratio, target, loss weighting, model, data, device, ...) is
+  compared. Only the run's storage metadata (`name`, `output_dir`) is ignored, so a moved sweep is not recomputed. A run that is
   replaced because its config changed is announced. `results.json` is written atomically, so an interrupted
   run is never mistaken for a finished one. Keep one sweep per output directory (change `--name` /
   `--output-dir` when you change settings such as epochs or learning rate).
@@ -252,7 +254,7 @@ python -m incremental_feature_cl.experiments.compare_ratios --dataset cifar100 -
 Outputs in `<output-dir>/<name>/` (name defaults to `ratio_sweep_<dataset>_e<n>_d<dim>_<init>_s<seed>`):
 
 | File | Content |
-|---|---|
+| --- | --- |
 | `ratio_sweep_runs.csv` | one row per run: target, **requested** ratio (`ratio`, `ratio_label`), loss weighting, final/average metrics, and the realized ratio (`final_realized_ratio_label`, `final_negatives_per_target`, `mean_negatives_per_target`, `fraction_experiences_at_requested_ratio`, `first_experience_at_requested_ratio`) |
 | `ratio_sweep_by_ratio.csv` | mean and std across targets for each ratio (and loss setting) |
 | `ratio_sweep.json` | plan, config, environment, both tables, `ratio_semantics` |
@@ -285,6 +287,7 @@ for i, exp in enumerate(benchmark.train_stream):
     strategy.train(exp)
     strategy.eval(benchmark.test_stream[: i + 1])
 ```
+
 or attach `FeatureExpansionPlugin(policy)` to *any* Avalanche strategy (`Naive`, `Replay`, ...; tested).
 The plugin expands the model at the experience boundary and rebuilds the optimizer. The model is a plain
 `nn.Module` and has no Avalanche imports. Evaluate on `test_stream[: t+1]`. The model uses global class IDs, so the output head may already contain
@@ -294,14 +297,14 @@ the built-in streams enforce the same divisibility rule.
 ## Plots (`<run>/plots/`)
 
 | File | Shows |
-|---|---|
+| --- | --- |
 | A_accuracy_vs_experience | target accuracy (+negative acc, F1) or seen/all accuracy per experience |
 | B_accuracy_vs_class | accuracy of each class after the last experience (grey = unseen) |
 | C_class_accuracy_heatmap | rows = experience, columns = class, cell = class accuracy |
 | D_class_accuracy_curves | every class's accuracy over experiences (drops = forgetting) |
 | E_forgetting_vs_class | max previous accuracy - final accuracy per class |
 | F_feature_growth | feature dimensionality and parameter count per experience |
-| G_new_feature_utilization | `||W_k||` per block and mean `|W_new phi_new|` of the newest block |
+| G_new_feature_utilization | `norm(W_k)` per block and mean `norm(W_new phi_new)` of the newest block |
 | H_expansion_probe | logit change caused by expansion (0 => invariant) and old-prediction agreement after expansion / training |
 
 ## Result files

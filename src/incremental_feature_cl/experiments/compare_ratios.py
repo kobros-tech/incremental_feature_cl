@@ -26,7 +26,7 @@ experimental axis (loss weighting), not an implementation detail: ``balanced`` n
 per experience using the *realized* counts, ``none`` lets the data imbalance act on the loss.
 
 Runs are resumable: a run whose saved ``results.json`` has an identical config is reused
-(``--no-resume`` recomputes; run name, output dir and dataset root do not count as a change).
+(``--no-resume`` recomputes; only run name and output dir are ignored when comparing configs).
 ``--resummarize DIR`` rebuilds every summary/plot of a finished sweep from its saved runs, without
 training.  Outputs under ``<output-dir>/<name>/``:
 ``ratio_sweep_runs.csv`` (one row per run), ``ratio_sweep_by_ratio.csv`` (mean/std over targets),

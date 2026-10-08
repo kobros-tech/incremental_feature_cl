@@ -10,6 +10,28 @@ repos:
       - id: check-added-large-files
         args: ["--maxkb=500"]
 
+  # Markdown formatting
+  - repo: local
+    hooks:
+      - id: prettier-markdown
+        name: prettier (markdown)
+        entry: prettier
+        args: ["--write", "--list-different"]
+        types: [markdown]
+        language: node
+        additional_dependencies:
+          - "prettier@3.6.2"
+
+  # Markdown linting and auto-fixing
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.23.3
+    hooks:
+      - id: markdownlint-cli2-docker
+        args:
+          - "--config"
+          - ".markdownlint-cli2.yaml"
+          - "--fix"
+
   # Copyright header: automatically inserts LICENSE-HEADER.txt as a `#`
   # comment block at the top of every Python file that doesn't already
   # have it (existing headers are left untouched). This runs BEFORE ruff
