@@ -23,6 +23,7 @@ from .common import (
     config_from_args,
     estimate_train_samples,
     get_data,
+    large_run_warning,
     run_experiment,
 )
 
@@ -63,6 +64,8 @@ def main(argv=None) -> None:
             f"runs={len(targets)}  training samples/run~{per_run:,}  total~{per_run * len(targets):,} "
             f"sample-passes (+ a full test-set evaluation after every experience)"
         )
+        if warning := large_run_warning(len(targets)):
+            print(warning)
         if a.dry_run or not a.yes:
             print("Not running. Re-run with --yes to start." if not a.dry_run else "Dry run only.")
             return

@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from ..data import build_class_incremental_stream, build_target_vs_rest_stream, load_dataset
+from ..data.streams import ratio_report
 from ..evaluation.result_store import RunResult
 from ..models import IncrementalFeatureMapModel, build_backbone
 from ..plotting import make_all_plots
@@ -68,10 +69,37 @@ def build_stream(cfg: ExperimentConfig, train, test):
     return build_class_incremental_stream(train, test, d.n_experiences, cfg.seed, d.class_order)
 
 
-def estimate_train_samples(cfg: ExperimentConfig) -> int:
+def plan_stream(cfg: ExperimentConfig) -> tuple[int, list[dict[str, Any]]]:
+    """Build the stream once (no training): ``(training sample-passes, per-experience ratio reports)``.
+
+    The reports (``data.streams.ratio_report``) show *before* a sweep which experiences will get the
+    requested number of negatives and which will fall short because the cumulative pool is still
+    too small.  Empty list outside target mode.
+    """
     train, test, *_ = get_data(cfg)
     stream = build_stream(cfg, train, test)
-    return sum(len(e.dataset) for e in stream.train) * cfg.train.train_epochs
+    passes = sum(len(e.dataset) for e in stream.train) * cfg.train.train_epochs
+    if cfg.mode != "target":
+        return passes, []
+    reports = []
+    for e in stream.train:
+        n_t = int((e.labels == stream.target_class).sum())
+        reports.append(ratio_report(n_t, len(e.labels) - n_t, stream.target_to_negatives))
+    return passes, reports
+
+
+def estimate_train_samples(cfg: ExperimentConfig) -> int:
+    return plan_stream(cfg)[0]
+
+
+def large_run_warning(n_runs: int, threshold: int = 50) -> str | None:
+    """A loud one-line warning for big sweeps (e.g. ``--target-class all``), else ``None``."""
+    if n_runs < threshold:
+        return None
+    return (
+        f"WARNING: this will run {n_runs:,} experiments. "
+        "Use --dry-run to inspect the plan first; finished runs are reused on restart."
+    )
 
 
 def _trainer_cfg(cfg: ExperimentConfig, device: str) -> TrainerConfig:

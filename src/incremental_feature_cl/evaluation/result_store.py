@@ -127,7 +127,11 @@ class RunResult:
     def save(self, out_dir: str | Path) -> Path:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
-        (out / "results.json").write_text(json.dumps(self.to_dict(), indent=2))
+        # write-then-rename: an interrupted run never leaves a truncated results.json that a
+        # later resume could mistake for a finished run
+        tmp = out / "results.json.tmp"
+        tmp.write_text(json.dumps(self.to_dict(), indent=2))
+        tmp.replace(out / "results.json")
         rows = _flat_rows(self.experiences)
         cols: list[str] = []
         for row in rows:

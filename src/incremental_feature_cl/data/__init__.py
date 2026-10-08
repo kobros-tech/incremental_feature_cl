@@ -12,6 +12,7 @@ from .streams import (
     format_ratio,
     negatives_for_ratio,
     parse_ratio,
+    ratio_report,
     validate_target_to_negatives,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "make_synthetic_dataset",
     "negatives_for_ratio",
     "parse_ratio",
+    "ratio_report",
     "validate_target_to_negatives",
 ]

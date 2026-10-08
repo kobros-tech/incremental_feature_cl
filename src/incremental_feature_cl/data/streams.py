@@ -31,11 +31,23 @@ class Experience:
 
 
 class Stream:
-    def __init__(self, train, test_dataset, num_classes, class_order, *, target_class=None):
+    def __init__(
+        self,
+        train,
+        test_dataset,
+        num_classes,
+        class_order,
+        *,
+        target_class=None,
+        target_to_negatives=None,
+    ):
         self.train, self.test_dataset = train, test_dataset
         self.num_classes = num_classes
         self.class_order = class_order
         self.target_class = target_class
+        # the *requested* ratio (targets per negative); the realized one is per experience,
+        # see ``ratio_report``
+        self.target_to_negatives = target_to_negatives
         self._first = {}
         for exp in train:
             for c in exp.new_classes:
@@ -156,6 +168,38 @@ def negatives_for_ratio(n_target: int, target_to_negatives: float) -> int:
     return math.floor(n_target / target_to_negatives + 1e-9)
 
 
+def ratio_report(
+    n_target: int, n_negative: int, target_to_negatives: float | None
+) -> dict[str, float | int | str | bool | None]:
+    """Requested vs realized target:negative ratio of one training experience.
+
+    ``target_to_negatives`` is a requested *upper bound on negatives per target*: negatives are
+    drawn without replacement from the cumulative pool and never duplicated, so while the pool is
+    small the realized ratio is less negative-heavy than requested (e.g. requested 1:5, realized
+    1:3).  All ratios are *targets per negative* (``5:1`` -> 5.0, ``1:5`` -> 0.2).
+
+    Returns ``requested_target_to_negatives``, ``n_requested_negative``,
+    ``realized_target_to_negatives`` (``None`` without negatives), ``realized_ratio_label`` (``None``
+    unless both targets and negatives are present) and
+    ``ratio_satisfied`` (``True`` when the requested negatives were available; ``None`` when
+    there is nothing to enforce: cumulative mode or an experience without target samples).
+    """
+    realized = n_target / n_negative if n_negative > 0 else None
+    out: dict[str, float | int | str | bool | None] = {
+        "requested_target_to_negatives": target_to_negatives,
+        "n_requested_negative": None,
+        "realized_target_to_negatives": realized,
+        # no label without both classes present (``format_ratio`` is for positive ratios)
+        "realized_ratio_label": format_ratio(realized) if realized else None,
+        "ratio_satisfied": None,
+    }
+    if target_to_negatives is not None and n_target > 0:
+        n_requested = negatives_for_ratio(n_target, target_to_negatives)
+        out["n_requested_negative"] = n_requested
+        out["ratio_satisfied"] = n_negative >= n_requested
+    return out
+
+
 def build_target_vs_rest_stream(
     train,
     test,
@@ -179,8 +223,11 @@ def build_target_vs_rest_stream(
     * a number ``> 0``: keep **all** target samples and draw
       ``floor(n_target / target_to_negatives)`` negatives *without replacement* from the cumulative
       pool (``1.0`` = 1:1, ``0.2`` = 1 target : 5 negatives, ``0.1`` = 1:10, ``2.0`` = 2:1).
-      Targets are never subsampled or duplicated. If the pool holds fewer negatives than requested,
-      all of them are kept. The draw is deterministic given ``seed`` and the experience index.
+      Targets are never subsampled or duplicated. Negatives are never duplicated either: if the
+      pool holds fewer negatives than requested, all of them are kept, so the requested ratio is an
+      *upper bound on negatives per target* and the realized ratio can be less negative-heavy in
+      early experiences (see ``ratio_report``). The draw is deterministic given ``seed`` and the
+      experience index.
       Experiences without target samples (``target_in_every_experience=False``, ``i > 0``) have no
       ratio to enforce and keep the whole pool.
     """
@@ -248,4 +295,5 @@ def build_target_vs_rest_stream(
         num_classes,
         stream_order,
         target_class=target_class,
+        target_to_negatives=ratio,
     )

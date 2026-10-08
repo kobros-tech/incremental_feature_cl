@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import FixedLocator, FuncFormatter, MaxNLocator, NullLocator
 
 from ..evaluation.ratio_summary import ratio_sort_key
 from ._common import finish
@@ -33,11 +33,93 @@ _PANELS = [
     (
         "Forgetting",
         [
-            ("target_recall_drop", "target recall drop"),
-            ("average_forgetting", "avg per-class forgetting"),
+            ("target_recall_peak_to_final_drop", "target recall: peak -> final drop"),
+            ("average_forgetting", "avg forgetting (all classes)"),
         ],
     ),
 ]
+
+
+def plot_ratio_main(aggregate, path):
+    """The headline figure: balanced accuracy vs the *requested* ratio (mean +/- std over targets,
+    one line per loss weighting), next to how many negatives per target were actually *realized*.
+
+    Left: final and mean-over-experiences balanced accuracy. Right: realized vs requested negatives
+    per target (final experience; mean over experiences) with the ``realized = requested`` diagonal;
+    points below it mean the cumulative negative pool was too small to reach the requested ratio,
+    which also affects the ``average`` (over experiences) metrics.
+    """
+    numeric = [a for a in aggregate if a["ratio"] is not None]
+    labels = []
+    for a in sorted(aggregate, key=lambda a: ratio_sort_key(a["ratio"])):
+        if a["ratio_label"] not in labels:
+            labels.append(a["ratio_label"])
+    xs = {lab: i for i, lab in enumerate(labels)}
+    pws = list(dict.fromkeys(a["pos_weight"] for a in aggregate))
+    styles = ["-", "--", ":", "-."]
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(12, 4.3))
+    for pi, pw in enumerate(pws):
+        aggs = sorted(
+            (a for a in aggregate if a["pos_weight"] == pw), key=lambda a: xs[a["ratio_label"]]
+        )
+        x = np.array([xs[a["ratio_label"]] for a in aggs])
+        tag = "" if len(pws) == 1 else f" [{pw}]"
+        for key, name, color in (
+            ("final_balanced_accuracy", "final", "C0"),
+            ("average_balanced_accuracy", "mean over experiences", "C1"),
+        ):
+            m = np.array([a[f"mean_{key}"] for a in aggs], dtype=float)
+            sd = np.array([a[f"std_{key}"] for a in aggs], dtype=float)
+            ax.errorbar(
+                x, m, yerr=sd, fmt=f"o{styles[pi % 4]}", color=color, capsize=3, label=name + tag
+            )
+        rx = [
+            (
+                1 / a["ratio"],
+                a["mean_final_negatives_per_target"],
+                a["mean_mean_negatives_per_target"],
+            )
+            for a in aggs
+            if a["ratio"] is not None and a["mean_final_negatives_per_target"] is not None
+        ]
+        if rx:
+            req, fin, avg = zip(*rx)
+            bx.plot(req, fin, f"o{styles[pi % 4]}", color="C0", label="final experience" + tag)
+            bx.plot(req, avg, f"s{styles[pi % 4]}", color="C1", label="mean over experiences" + tag)
+    ax.set_xticks(range(len(labels)), labels)
+    ax.set_xlabel("requested target : negative ratio")
+    ax.set_ylabel("balanced accuracy")
+    ax.set_ylim(-0.02, 1.02)
+    if "cumulative" in labels and len(labels) > 1:
+        ax.axvline(len(labels) - 1.5, color="gray", ls=":", lw=1)  # reference, not a ratio
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    ax.set_title("Balanced accuracy vs requested ratio", fontsize=10)
+    if numeric:
+        reqs = [1 / a["ratio"] for a in numeric]
+        bx.plot(
+            [min(reqs), max(reqs)],
+            [min(reqs), max(reqs)],
+            color="gray",
+            ls=":",
+            lw=1,
+            label="realized = requested",
+        )
+    bx.set_xscale("log")
+    bx.set_yscale("log")
+    if numeric:
+        ticks = sorted({1 / a["ratio"] for a in numeric})
+        for axis in (bx.xaxis, bx.yaxis):
+            axis.set_major_locator(FixedLocator(ticks))
+            axis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+            axis.set_minor_locator(NullLocator())
+    bx.set_xlabel("requested negatives per target")
+    bx.set_ylabel("realized negatives per target")
+    bx.grid(alpha=0.3, which="both")
+    bx.legend(fontsize=8)
+    bx.set_title("Realized vs requested ratio (below the line = pool too small)", fontsize=10)
+    fig.suptitle("Target:negative ratio sweep (mean over targets)")
+    return finish(fig, path)
 
 
 def plot_ratio_final_metrics(rows, aggregate, path):
