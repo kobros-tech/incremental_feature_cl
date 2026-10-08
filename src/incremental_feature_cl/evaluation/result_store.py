@@ -35,6 +35,27 @@ def _clean(o: Any) -> Any:
     return o
 
 
+def _flat_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Scalar columns for metrics.csv. A key that holds a dict in *any* record (e.g. ``probe``,
+    ``feature_expansion``, which are ``None`` in experience 0) is flattened to ``<key>_<subkey>``
+    columns; ``target_metrics`` keeps its unprefixed names. Lists stay in results.json only."""
+    scalar = (int, float, str, bool, type(None))
+    dict_keys = {k for r in records for k, v in r.items() if isinstance(v, dict)}
+    dict_keys |= {"probe", "feature_expansion", "output_expansion"}  # None in some experiences
+    rows = []
+    for rec in records:
+        row: dict[str, Any] = {}
+        for k, v in rec.items():
+            if k in dict_keys:
+                for sk, sv in (v or {}).items():
+                    if isinstance(sv, scalar):
+                        row[sk if k == "target_metrics" else f"{k}_{sk}"] = _clean(sv)
+            elif isinstance(v, scalar):
+                row[k] = _clean(v)
+        rows.append(row)
+    return rows
+
+
 @dataclass
 class RunResult:
     config: dict[str, Any]
@@ -106,21 +127,20 @@ class RunResult:
     def save(self, out_dir: str | Path) -> Path:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
-        (out / "results.json").write_text(json.dumps(self.to_dict(), indent=2))
-        flat_keys = [
-            k
-            for k, v in self.experiences[0].items()
-            if isinstance(v, (int, float, str, type(None)))
-        ]
-        tm_keys = list(self.experiences[0].get("target_metrics", {}).keys())
+        # write-then-rename: an interrupted run never leaves a truncated results.json that a
+        # later resume could mistake for a finished run
+        tmp = out / "results.json.tmp"
+        tmp.write_text(json.dumps(self.to_dict(), indent=2))
+        tmp.replace(out / "results.json")
+        rows = _flat_rows(self.experiences)
+        cols: list[str] = []
+        for row in rows:
+            cols += [k for k in row if k not in cols]
         with open(out / "metrics.csv", "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(flat_keys + tm_keys)
-            for e in self.experiences:
-                tm = e.get("target_metrics", {})
-                w.writerow(
-                    [_clean(e.get(k)) for k in flat_keys] + [_clean(tm.get(k)) for k in tm_keys]
-                )
+            w.writerow(cols)
+            for row in rows:
+                w.writerow([row.get(k) for k in cols])
         with open(out / "per_class_accuracy.csv", "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["experience"] + [f"class_{c}" for c in range(self.num_classes)])

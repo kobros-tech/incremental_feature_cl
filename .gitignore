@@ -4,4 +4,5 @@ data/
 results/*
 !results/.gitkeep
 .pytest_cache/
+.ruff_cache/
 !src/incremental_feature_cl/data

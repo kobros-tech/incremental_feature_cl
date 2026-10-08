@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from ..data.streams import Experience, Stream, binary_labels
+from ..data.streams import Experience, Stream, binary_labels, ratio_report
 from ..models import IncrementalFeatureMapModel
 from .evaluate import evaluate_state
 from .policy import ExpansionPolicy
@@ -151,7 +151,8 @@ class ContinualTrainer:
         self._target = stream.target_class
         if cfg.mode == "target":
             policy.single_output = True
-            assert model.num_outputs == 1, "target mode needs a model with exactly one output"
+            if model.num_outputs != 1:
+                raise ValueError("target mode needs a model with exactly one output")
         records: list[dict[str, Any]] = []
         cumulative_feature_parameters = 0
         for exp in stream.train:
@@ -180,7 +181,21 @@ class ContinualTrainer:
             orec = policy.expand_outputs(model, exp.classes if cfg.mode == "multiclass" else [])
             rec["output_expansion"] = orec.to_dict() if orec else None
 
-            # (5) train
+            # (5) train. Record what was actually trained on (the realized target:negative ratio)
+            labels = exp.labels
+            rec["n_train_samples"] = len(labels)
+            if cfg.mode == "target":
+                rec["n_train_target"] = int((labels == stream.target_class).sum())
+                rec["n_train_negative"] = rec["n_train_samples"] - rec["n_train_target"]
+                # requested vs realized ratio (negatives are never duplicated, so early
+                # experiences with a small negative pool can fall short of the request)
+                rec.update(
+                    ratio_report(
+                        rec["n_train_target"],
+                        rec["n_train_negative"],
+                        stream.target_to_negatives,
+                    )
+                )
             rec["train_loss"] = self._train_experience(exp)
             rec["train_time_s"] = time.time() - t0
 

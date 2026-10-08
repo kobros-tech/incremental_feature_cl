@@ -9,7 +9,10 @@ from .streams import (
     binary_labels,
     build_class_incremental_stream,
     build_target_vs_rest_stream,
+    format_ratio,
     negatives_for_ratio,
+    parse_ratio,
+    ratio_report,
     validate_target_to_negatives,
 )
 
@@ -20,8 +23,11 @@ __all__ = [
     "binary_labels",
     "build_class_incremental_stream",
     "build_target_vs_rest_stream",
+    "format_ratio",
     "load_dataset",
     "make_synthetic_dataset",
     "negatives_for_ratio",
+    "parse_ratio",
+    "ratio_report",
     "validate_target_to_negatives",
 ]

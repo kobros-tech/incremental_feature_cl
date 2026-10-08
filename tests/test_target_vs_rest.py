@@ -10,6 +10,7 @@ from incremental_feature_cl.data import (
     build_target_vs_rest_stream,
     make_synthetic_dataset,
     negatives_for_ratio,
+    ratio_report,
 )
 from incremental_feature_cl.evaluation import binary_target_metrics
 from incremental_feature_cl.training import ContinualTrainer, ExpansionPolicy, TrainerConfig
@@ -233,3 +234,74 @@ def test_ratio_with_target_only_in_first_experience(big):
     assert [c[1] for c in _counts(st)[1:]] == [100, 150, 200]
     ref = _big_stream(big, None, target_in_every_experience=False)
     assert [c[1] for c in _counts(ref)] == [50, 100, 150, 200]
+
+
+# --------------------------------------------------------------------------- #
+# requested vs realized ratio
+# --------------------------------------------------------------------------- #
+def test_ratio_report_requested_vs_realized():
+    full = ratio_report(10, 50, 0.2)  # 1:5 requested, 50 negatives available -> satisfied
+    assert full["n_requested_negative"] == 50 and full["ratio_satisfied"] is True
+    assert full["realized_target_to_negatives"] == pytest.approx(0.2)
+    assert full["realized_ratio_label"] == "1:5" and full["requested_target_to_negatives"] == 0.2
+
+    short = ratio_report(12, 36, 0.2)  # asked for 60 negatives, only 36 exist -> realized 1:3
+    assert short["n_requested_negative"] == 60 and short["ratio_satisfied"] is False
+    assert short["realized_ratio_label"] == "1:3"
+    assert short["realized_target_to_negatives"] == pytest.approx(1 / 3)
+
+    over = ratio_report(10, 4, 2.0)  # 2:1 asks for 5 negatives, 4 available
+    assert over["n_requested_negative"] == 5 and over["ratio_satisfied"] is False
+
+    cumulative = ratio_report(10, 50, None)  # nothing to enforce
+    assert cumulative["ratio_satisfied"] is None and cumulative["n_requested_negative"] is None
+    assert cumulative["realized_ratio_label"] == "1:5"
+
+    no_target = ratio_report(0, 100, 0.2)  # target absent: no ratio to enforce
+    assert no_target["ratio_satisfied"] is None and no_target["realized_target_to_negatives"] == 0
+    assert no_target["realized_ratio_label"] is None
+    assert ratio_report(5, 0, 1.0)["realized_target_to_negatives"] is None  # no negatives at all
+
+
+def test_trainer_records_requested_and_realized_ratio(big):
+    """1:10 on the 4-experience stream: pools are 50/100/150/200, 100 negatives requested."""
+    st = _big_stream(big, 0.1)
+    assert st.target_to_negatives == 0.1
+    m = IncrementalFeatureMapModel(build_backbone("mlp", in_dim=3 * 8 * 8), num_outputs=1)
+    tr = ContinualTrainer(
+        m,
+        ExpansionPolicy(2, "zero"),
+        TrainerConfig(mode="target", train_epochs=1, lr=0.05, train_mb_size=16, probe_size=0),
+    )
+    recs = tr.fit(st)
+    assert [r["n_train_negative"] for r in recs] == [50, 100, 100, 100]
+    assert [r["n_requested_negative"] for r in recs] == [100] * 4
+    assert [r["ratio_satisfied"] for r in recs] == [False, True, True, True]
+    assert [r["realized_ratio_label"] for r in recs] == ["1:5", "1:10", "1:10", "1:10"]
+    assert all(r["requested_target_to_negatives"] == 0.1 for r in recs)
+
+
+def test_trainer_cumulative_reports_nothing_to_satisfy(big):
+    st = _big_stream(big, None)
+    m = IncrementalFeatureMapModel(build_backbone("mlp", in_dim=3 * 8 * 8), num_outputs=1)
+    tr = ContinualTrainer(
+        m, ExpansionPolicy(0, "zero"), TrainerConfig(mode="target", train_mb_size=16, probe_size=0)
+    )
+    recs = tr.fit(st)
+    assert all(r["ratio_satisfied"] is None and r["n_requested_negative"] is None for r in recs)
+    assert [r["realized_ratio_label"] for r in recs] == ["1:5", "1:10", "1:15", "1:20"]
+
+
+def test_trainer_handles_experiences_without_target_samples(big):
+    st = _big_stream(big, 0.2, target_in_every_experience=False)
+    m = IncrementalFeatureMapModel(build_backbone("mlp", in_dim=3 * 8 * 8), num_outputs=1)
+    tr = ContinualTrainer(
+        m,
+        ExpansionPolicy(0, "zero"),
+        TrainerConfig(mode="target", train_mb_size=16, probe_size=0, pos_weight=None),
+    )
+    recs = tr.fit(st)
+    assert recs[0]["ratio_satisfied"] is True and recs[0]["realized_ratio_label"] == "1:5"
+    for r in recs[1:]:  # no target samples: nothing to enforce, no label, no crash
+        assert r["n_train_target"] == 0 and r["ratio_satisfied"] is None
+        assert r["realized_ratio_label"] is None and r["n_requested_negative"] is None
