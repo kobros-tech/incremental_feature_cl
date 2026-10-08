@@ -282,7 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    add_common_args(p, "cifar100")
+    add_common_args(p, "cifar100", include_target_ratio=False)
     p.add_argument(
         "--target-class",
         nargs="+",
@@ -339,8 +339,6 @@ def main(argv=None) -> None:
     if a.resummarize:
         resummarize(Path(a.resummarize), plots=not a.no_plots)
         return
-    if a.target_to_negatives is not None:
-        p.error("use --ratios for the sweep; --target-to-negatives is the single-run flag")
     try:
         ratios = parse_ratios(a.ratios, include_cumulative=not a.no_cumulative)
         cfg = config_from_args(a, "target", "cifar100")

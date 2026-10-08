@@ -301,7 +301,12 @@ def _run_avalanche(cfg, train, test, num_classes, shape, baseline, verbose) -> R
 # ---------------------------------------------------------------------- #
 # CLI helpers shared by the experiment scripts
 # ---------------------------------------------------------------------- #
-def add_common_args(p: argparse.ArgumentParser, default_dataset: str) -> None:
+def add_common_args(
+    p: argparse.ArgumentParser,
+    default_dataset: str,
+    *,
+    include_target_ratio: bool = True,
+) -> None:
     p.add_argument("--config", help="YAML config (CLI flags and --set override it)")
     p.add_argument(
         "--set",
@@ -330,12 +335,16 @@ def add_common_args(p: argparse.ArgumentParser, default_dataset: str) -> None:
     p.add_argument("--device", help="auto|cpu|cuda")
     p.add_argument("--output-dir")
     p.add_argument("--name")
-    p.add_argument(
-        "--target-to-negatives",
-        type=float,
-        help="target:negative training ratio (target mode only): 0.2 = 1 target : 5 negatives, "
-        "1 = 1:1; omit to keep cumulative negative sampling",
-    )
+    if include_target_ratio:
+        p.add_argument(
+            "--target-to-negatives",
+            type=float,
+            help=(
+                "target:negative training ratio (target mode only): "
+                "0.2 = 1 target : 5 negatives, 1 = 1:1; "
+                "omit to keep cumulative negative sampling"
+            ),
+        )
     p.add_argument("--no-plots", action="store_true")
 
 
