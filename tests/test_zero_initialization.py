@@ -3,8 +3,9 @@
 """Central invariant:  f_{t+1}(x) == f_t(x)  immediately after expansion (zero init)."""
 
 import torch
+from _backbones import build_backbone
 
-from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
+from incremental_feature_cl import IncrementalFeatureMapModel
 
 
 def test_predictions_unchanged_after_expansion(conv_model, x_batch):

@@ -97,14 +97,17 @@ class RunResult:
             "final_parameter_count": last["parameter_count"],
             "total_train_time_s": float(sum(e["train_time_s"] for e in self.experiences)),
         }
-        if self.mode == "target":
+        final_target = last.get("target_metrics")
+        if self.mode == "target" and final_target:
             for k in (
                 "target_accuracy",
                 "target_f1",
                 "false_positive_rate",
                 "overall_binary_accuracy",
+                "balanced_accuracy",
+                "auc",
             ):
-                s[f"final_{k}"] = last["target_metrics"][k]
+                s[f"final_{k}"] = final_target.get(k)
         self.summary = s
         return s
 

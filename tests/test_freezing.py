@@ -1,7 +1,9 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
+from _backbones import build_backbone
+
+from incremental_feature_cl import IncrementalFeatureMapModel
 
 
 def test_freeze_backbone_disables_backbone_gradients():

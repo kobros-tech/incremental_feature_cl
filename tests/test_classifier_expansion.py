@@ -3,8 +3,9 @@
 """Feature expansion and output expansion are independent operations."""
 
 import torch
+from _backbones import build_backbone
 
-from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
+from incremental_feature_cl import IncrementalFeatureMapModel
 
 
 def test_output_dim_independent_of_feature_dim(conv_model, x_batch):

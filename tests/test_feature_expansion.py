@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT
 import pytest
 import torch
+from _backbones import build_backbone
 
-from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
+from incremental_feature_cl import IncrementalFeatureMapModel
 
 
 def test_feature_dim_increases_exactly_as_requested(conv_model):

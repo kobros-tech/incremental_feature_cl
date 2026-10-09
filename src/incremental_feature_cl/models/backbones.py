@@ -1,114 +1,149 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-"""Small configurable backbones.  Each exposes ``out_dim`` and returns ``(B, out_dim)``.
+"""Use any external ``nn.Module`` as the shared representation ``h(x)``.
 
-The feature-expansion mechanism only needs ``out_dim``; it is independent of
-the backbone architecture.
+The package ships no architectures of its own.  Any model works, e.g. Avalanche's
+``SimpleMLP`` or ``resnet32``::
+
+    from avalanche.models import SimpleMLP
+    backbone = FeatureBackbone(SimpleMLP(input_size=3072, hidden_size=512), input_shape=(3, 32, 32))
+    model = IncrementalFeatureMapModel(backbone)           # out_dim is read from the backbone
+
+:class:`FeatureBackbone` finds the feature path of the wrapped model in this order:
+
+1. ``model.get_features(x)``  (Avalanche ``BaseModel`` convention, e.g. ``SimpleMLP``);
+2. ``model.forward_rep(x)``   (Avalanche ``ResNet`` / ``resnet32``);
+3. a final ``Linear`` named ``classifier`` / ``fc`` / ``head`` is replaced by ``Identity``
+   (torchvision-style models);
+4. otherwise the model is assumed to return features already.
+
+For the Skill models the representation must be frozen (skills replay features), so it has to be
+informative before it is frozen: load pretrained weights (``weights=``) or call
+:func:`warm_up_backbone` once on the first experience.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import importlib
+import inspect
+from collections.abc import Sequence
+from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+_HEAD_NAMES = ("classifier", "fc", "head")
+# short names for the Avalanche models; any dotted path ``package.module.Name`` works as well
+ALIASES = {
+    "simplemlp": "avalanche.models.SimpleMLP",
+    "resnet32": "avalanche.models.resnet32.resnet32",
+}
+
 
 class IdentityBackbone(nn.Module):
-    """Flatten only: Phi_0(x) = x.  Used for synthetic tests."""
+    """Flatten only: ``h(x) = x`` (a classifier on raw inputs)."""
 
     def __init__(self, in_dim: int):
         super().__init__()
-        self.out_dim = in_dim
+        self.out_dim = int(in_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x.flatten(1)
 
 
-class MLPBackbone(nn.Module):
-    def __init__(self, in_dim: int, hidden: Sequence[int] = (128,), out_dim: int = 64):
+class FeatureBackbone(nn.Module):
+    """Adapter that exposes an external model as ``x -> (B, out_dim)`` with an ``out_dim`` attribute."""
+
+    def __init__(self, model: nn.Module, input_shape: Sequence[int] | None = None):
         super().__init__()
-        dims = [in_dim, *hidden, out_dim]
-        layers: list[nn.Module] = []
-        for i in range(len(dims) - 1):
-            layers += [nn.Linear(dims[i], dims[i + 1]), nn.ReLU()]
-        self.net = nn.Sequential(*layers)
-        self.out_dim = out_dim
+        self.model = model
+        if hasattr(model, "get_features"):
+            self._features = model.get_features
+        elif hasattr(model, "forward_rep"):
+            self._features = model.forward_rep
+        else:
+            for name in _HEAD_NAMES:
+                if isinstance(getattr(model, name, None), nn.Linear):
+                    setattr(model, name, nn.Identity())
+                    break
+            self._features = model
+        if input_shape is None:
+            raise ValueError("input_shape is required to infer the feature dimension")
+        was_training = self.training
+        self.eval()
+        with torch.no_grad():
+            self.out_dim = int(self(torch.zeros(2, *input_shape)).shape[1])
+        self.train(was_training)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x.flatten(1))
+        return self._features(x).flatten(1)
 
 
-class SmallConvBackbone(nn.Module):
-    """Tiny CNN for fast CPU experiments / smoke tests."""
+def build_backbone(
+    spec: str,
+    input_shape: Sequence[int],
+    kwargs: dict[str, Any] | None = None,
+    weights: str | None = None,
+) -> nn.Module:
+    """Backbone from a name: ``identity``, an alias (``simplemlp``, ``resnet32``) or a dotted path.
 
-    def __init__(self, in_channels: int = 3, width: int = 16, out_dim: int = 64):
-        super().__init__()
-        self.c1 = nn.Conv2d(in_channels, width, 3, padding=1)
-        self.c2 = nn.Conv2d(width, 2 * width, 3, padding=1)
-        self.fc = nn.Linear(2 * width, out_dim)
-        self.out_dim = out_dim
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.max_pool2d(F.relu(self.c1(x)), 2)
-        x = F.relu(self.c2(x))
-        x = F.adaptive_avg_pool2d(x, 1).flatten(1)
-        return F.relu(self.fc(x))
-
-
-class _BasicBlock(nn.Module):
-    def __init__(self, in_planes: int, planes: int, stride: int = 1):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_planes, planes, 3, stride, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, 3, 1, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_planes, planes, 1, stride, bias=False), nn.BatchNorm2d(planes)
-            )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        return F.relu(out + self.shortcut(x))
+    The class / factory is called with ``kwargs``; ``input_size`` is filled in from ``input_shape``
+    when the callable takes one and none was given.  ``weights`` is a ``torch.save``d state dict of
+    the external model (loaded with ``strict=False`` before the head is dropped).
+    """
+    kwargs = dict(kwargs or {})
+    if spec.lower() == "identity":
+        return IdentityBackbone(int(np.prod(input_shape)))
+    path = ALIASES.get(spec.lower(), spec).replace(":", ".")
+    module_name, _, attr = path.rpartition(".")
+    if not module_name:
+        raise ValueError(f"backbone {spec!r}: use 'identity', an alias or 'package.module.Name'")
+    try:
+        factory = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as exc:
+        raise ValueError(f"cannot import backbone {spec!r} ({exc})") from exc
+    if "input_size" in inspect.signature(factory).parameters:
+        kwargs.setdefault("input_size", int(np.prod(input_shape)))
+    model = factory(**kwargs)
+    if weights:
+        model.load_state_dict(torch.load(weights, map_location="cpu"), strict=False)
+    return FeatureBackbone(model, input_shape)
 
 
-class SlimResNet18(nn.Module):
-    """ResNet-18 layout with width ``nf`` (default 20, as in the CL literature); out_dim = 8*nf."""
+def warm_up_backbone(
+    backbone: nn.Module,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    epochs: int,
+    lr: float = 0.01,
+    batch_size: int = 64,
+    device: str | torch.device = "cpu",
+    seed: int = 0,
+) -> float:
+    """Train ``backbone`` (with a temporary linear head, cross-entropy) on ``(x, y)``, then freeze it.
 
-    def __init__(self, in_channels: int = 3, nf: int = 20):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, nf, 3, 1, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(nf)
-        cfg = [(nf, 1), (2 * nf, 2), (4 * nf, 2), (8 * nf, 2)]
-        layers, in_planes = [], nf
-        for planes, stride in cfg:
-            layers += [_BasicBlock(in_planes, planes, stride), _BasicBlock(planes, planes, 1)]
-            in_planes = planes
-        self.layers = nn.Sequential(*layers)
-        self.out_dim = 8 * nf
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.layers(out)
-        return F.adaptive_avg_pool2d(out, 1).flatten(1)
-
-
-_REGISTRY: dict[str, Callable[..., nn.Module]] = {
-    "identity": IdentityBackbone,
-    "mlp": MLPBackbone,
-    "smallconv": SmallConvBackbone,
-    "slimresnet18": SlimResNet18,
-}
-
-
-def build_backbone(name: str, **kwargs) -> nn.Module:
-    """Build a backbone by name; the result always has an ``out_dim`` attribute."""
-    key = name.lower()
-    if key not in _REGISTRY:
-        raise ValueError(f"unknown backbone {name!r}; choose from {sorted(_REGISTRY)}")
-    return _REGISTRY[key](**kwargs)
+    Meant to be called once, on the first experience, before a frozen representation is used by
+    the skills.  Returns the final mean loss.
+    """
+    device = torch.device(device)
+    out_dim = int(backbone.out_dim)
+    head = nn.Linear(out_dim, int(y.max()) + 1).to(device)
+    backbone.to(device).requires_grad_(True).train()
+    params = [*backbone.parameters(), *head.parameters()]
+    opt = torch.optim.SGD(params, lr=lr, momentum=0.9)
+    generator = torch.Generator().manual_seed(seed)
+    loss_value = float("nan")
+    for _ in range(epochs):
+        order = torch.randperm(len(x), generator=generator)
+        for start in range(0, len(x), batch_size):
+            idx = order[start : start + batch_size]
+            loss = F.cross_entropy(head(backbone(x[idx].to(device))), y[idx].to(device))
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            loss_value = float(loss.detach())
+    backbone.requires_grad_(False).eval()
+    return loss_value

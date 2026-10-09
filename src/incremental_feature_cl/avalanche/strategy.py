@@ -1,29 +1,38 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
-"""Avalanche adapter.
+"""Avalanche strategy around :class:`OneVsRestSkillModel` (the core models stay Avalanche-free).
 
-The model and the expansion policy live in the core package; this module only
-connects them to Avalanche's experience boundaries:
+Avalanche provides the benchmark, the experience stream, device handling and metrics.  The model
+provides everything class-specific.  Avalanche's generic replay is deliberately NOT used: every
+skill owns its target/negative memory.  Per experience the strategy hands the model the
+experience data once; the model creates new skills, updates *every* existing skill with the new
+classes as negatives, and replays the per-skill memory.  Skill epochs, batch size and learning
+rate live in ``SkillConfig`` (so ``train_epochs`` is fixed to 1 here).
 
-* ``FeatureExpansionPlugin``   - attach to *any* Avalanche strategy.
-* ``IncrementalFeatureSpaceStrategy`` - ``SupervisedTemplate`` + that plugin.
+Use any Avalanche benchmark, and any Avalanche model as the (frozen) backbone::
 
-Note: evaluate on ``test_stream[: t + 1]`` (seen experiences). Output heads are
-grown on demand, so unseen classes have no output unit yet.
+    from avalanche.benchmarks.classic import SplitCIFAR100
+    from avalanche.models import SimpleMLP
+    from incremental_feature_cl.models import FeatureBackbone, OneVsRestSkillModel, SkillConfig
+
+    backbone = FeatureBackbone(SimpleMLP(input_size=3072), input_shape=(3, 32, 32))
+    model = OneVsRestSkillModel(backbone, config=SkillConfig(feature_expansion_dim=16))
+    strategy = OneVsRestSkillStrategy(model=model, num_classes=100)
+    for experience in SplitCIFAR100(n_experiences=5).train_stream:
+        strategy.train(experience)
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import Any
 
 import torch
 from avalanche.evaluation.metrics import accuracy_metrics
-from avalanche.training.plugins import EvaluationPlugin, SupervisedPlugin
+from avalanche.training.plugins import EvaluationPlugin
 from avalanche.training.templates import SupervisedTemplate
+from torch.utils.data import DataLoader
 
-from ..models import IncrementalFeatureMapModel
-from ..training.policy import ExpansionPolicy
+from ..models import OneVsRestSkillModel
 
 
 def quiet_evaluator() -> EvaluationPlugin:
@@ -32,63 +41,48 @@ def quiet_evaluator() -> EvaluationPlugin:
         return EvaluationPlugin(accuracy_metrics(stream=True), loggers=[])
 
 
-class FeatureExpansionPlugin(SupervisedPlugin):
-    """Expand the feature space (and output head) at each experience boundary.
-
-    Runs after Avalanche has prepared the experience; if the model grew, the
-    optimizer is rebuilt so new parameters are optimised.  Works with any
-    strategy whose ``model`` is an :class:`IncrementalFeatureMapModel`.
-    """
-
-    def __init__(self, policy: ExpansionPolicy):
-        super().__init__()
-        self.policy = policy
-        self.records: list[dict[str, Any]] = []
-
-    def before_training_exp(self, strategy, **kwargs):
-        exp = strategy.experience
-        model = strategy.model
-        if not isinstance(model, IncrementalFeatureMapModel):
-            raise TypeError("FeatureExpansionPlugin needs an IncrementalFeatureMapModel")
-        recs = self.policy.on_experience_start(
-            model, exp.current_experience, list(exp.classes_in_this_experience)
-        )
-        self.records.append(
-            {"index": exp.current_experience, "expansions": [r.to_dict() for r in recs]}
-        )
-        if recs:
-            model.to(strategy.device)
-            strategy.make_optimizer(reset_optimizer_state=True)  # shapes/params changed
-
-
-class IncrementalFeatureSpaceStrategy(SupervisedTemplate):
-    """Standard Avalanche strategy: ``strategy.train(exp)`` / ``strategy.eval(stream)``."""
+class OneVsRestSkillStrategy(SupervisedTemplate):
+    """Avalanche strategy around :class:`OneVsRestSkillModel`; ``strategy.train(exp)`` updates skills."""
 
     def __init__(
         self,
         *,
-        model: IncrementalFeatureMapModel,
-        optimizer: torch.optim.Optimizer,
-        policy: ExpansionPolicy | None = None,
-        criterion=None,
-        train_mb_size: int = 32,
-        train_epochs: int = 1,
+        model: OneVsRestSkillModel,
+        num_classes: int,
         eval_mb_size: int = 256,
         device: str = "cpu",
         plugins: list | None = None,
         evaluator=None,
         eval_every: int = -1,
     ):
-        self.expansion_plugin = FeatureExpansionPlugin(policy or ExpansionPolicy())
+        self.num_classes = int(num_classes)
+        self.skill_records: list[dict] = []
+        dummy = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.0)  # never stepped
         super().__init__(
             model=model,
-            optimizer=optimizer,
-            criterion=criterion or torch.nn.CrossEntropyLoss(),
-            train_mb_size=train_mb_size,
-            train_epochs=train_epochs,
+            optimizer=dummy,
+            criterion=torch.nn.CrossEntropyLoss(),  # unused: the skills own their binary losses
+            train_mb_size=eval_mb_size,
+            train_epochs=1,
             eval_mb_size=eval_mb_size,
             device=device,
-            plugins=[self.expansion_plugin, *(plugins or [])],
+            plugins=plugins or [],
             evaluator=evaluator or quiet_evaluator(),
             eval_every=eval_every,
+        )
+
+    def make_optimizer(self, *args, **kwargs):  # skills carry their own optimisers
+        pass
+
+    def forward(self):
+        """Scores laid out by class id so Avalanche's argmax-based metrics see class ids."""
+        return self.model.class_id_scores(self.mb_x, self.num_classes)
+
+    def training_epoch(self, **kwargs):
+        xs, ys = [], []
+        for batch in DataLoader(self.adapted_dataset, batch_size=512, shuffle=False):
+            xs.append(batch[0])
+            ys.append(batch[1])
+        self.skill_records.append(
+            self.model.update(torch.cat(xs), torch.cat(ys), device=self.device)
         )

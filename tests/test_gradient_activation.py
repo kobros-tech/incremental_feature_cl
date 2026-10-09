@@ -4,8 +4,9 @@
 
 import torch
 import torch.nn.functional as F
+from _backbones import build_backbone
 
-from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
+from incremental_feature_cl import IncrementalFeatureMapModel
 
 
 def _xor_like():

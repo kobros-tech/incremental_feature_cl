@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT
 import pytest
 import torch
+from _backbones import build_backbone
 
-from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
+from incremental_feature_cl import IncrementalFeatureMapModel
 from incremental_feature_cl.data import make_synthetic_dataset
 
 

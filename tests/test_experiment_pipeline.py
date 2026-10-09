@@ -29,9 +29,14 @@ def cfg(mode="multiclass", init="zero", dim=8, replay=0, seed=1, name="t"):
             "data": {
                 "dataset": "synthetic",
                 "n_experiences": 3,
-                "synthetic": {"n_classes": 6, "n_train_per_class": 16, "n_test_per_class": 8},
+                "synthetic": {
+                    "n_classes": 6,
+                    "n_train_per_class": 16,
+                    "n_test_per_class": 8,
+                    "shape": (1, 8, 8),
+                },
             },
-            "model": {"backbone": "smallconv", "new_feature_dim": dim, "initialization": init},
+            "model": {"backbone": "identity", "new_feature_dim": dim, "initialization": init},
             "train": {
                 "train_epochs": 1,
                 "lr": 0.05,
@@ -61,7 +66,7 @@ def test_run_saves_everything_and_plots(tmp_path, mode):
     } <= plots
     d = json.loads((tmp_path / "results.json").read_text())
     # reproducibility record
-    assert d["config"]["seed"] == 1 and d["config"]["model"]["backbone"] == "smallconv"
+    assert d["config"]["seed"] == 1 and d["config"]["model"]["backbone"] == "identity"
     assert {"git_commit", "torch", "package_version"} <= set(d["environment"])
     assert d["class_order"] and len(d["experiences"]) == 3
     # regenerate plots from disk only
