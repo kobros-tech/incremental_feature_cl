@@ -11,6 +11,8 @@ from .classifier import ExpandableLinearClassifier
 from .expandable import INITIALIZATIONS, Expandable, ExpansionRecord
 from .feature_map import FeatureBlock
 from .incremental_model import IncrementalFeatureMapModel
+from .ovr import OneVsRestSkillModel
+from .skill import Skill, SkillConfig
 
 __all__ = [
     "INITIALIZATIONS",
@@ -21,6 +23,9 @@ __all__ = [
     "IdentityBackbone",
     "IncrementalFeatureMapModel",
     "MLPBackbone",
+    "OneVsRestSkillModel",
+    "Skill",
+    "SkillConfig",
     "SlimResNet18",
     "SmallConvBackbone",
     "build_backbone",

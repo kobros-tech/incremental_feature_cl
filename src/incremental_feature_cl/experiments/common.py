@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from ..data import build_class_incremental_stream, build_target_vs_rest_stream, load_dataset
-from ..data.streams import ratio_report
+from ..data.streams import parse_ratio, ratio_report
 from ..evaluation.result_store import RunResult
 from ..models import IncrementalFeatureMapModel, build_backbone
 from ..plotting import make_all_plots
@@ -122,12 +122,15 @@ def _trainer_cfg(cfg: ExperimentConfig, device: str) -> TrainerConfig:
 
 
 def _print_row(rec: dict, mode: str) -> None:
-    extra = (
-        f" target_acc={rec['target_metrics']['target_accuracy']:.3f}"
-        f" neg_acc={rec['target_metrics']['negative_accuracy']:.3f}"
-        if mode == "target"
-        else ""
-    )
+    extra = ""
+    if mode == "target":
+        tm = rec["target_metrics"]
+        extra = (
+            f" target_acc={tm['target_accuracy']:.3f} neg_acc={tm['negative_accuracy']:.3f}"
+            f" bal_acc={tm['balanced_accuracy']:.3f}"
+        )
+        if tm.get("auc") is not None:
+            extra += f" auc={tm['auc']:.3f}"
     probe = rec.get("probe")
     pr = f" |dlogit|={probe['logit_max_abs_diff_expansion']:.1e}" if probe else ""
     print(
@@ -183,8 +186,14 @@ def run_experiment(
         make_all_plots(result, out)
     if verbose:
         s = result.summary
+        tail = ""
+        if s.get("final_balanced_accuracy") is not None:
+            tail = f" final_bal_acc={s['final_balanced_accuracy']:.3f}"
+            if s.get("final_auc") is not None:
+                tail += f" final_auc={s['final_auc']:.3f}"
         print(
-            f"[{cfg.name}] final_acc_seen={s['final_accuracy_seen']:.3f} avg_acc={s['average_accuracy_seen']:.3f}"
+            f"[{cfg.name}] final_acc_seen={s['final_accuracy_seen']:.3f}{tail}"
+            f" avg_acc={s['average_accuracy_seen']:.3f}"
             f" avg_forgetting={s['average_forgetting']:.3f} -> {out}",
             flush=True,
         )
@@ -192,14 +201,9 @@ def run_experiment(
 
 
 # ---------------------------------------------------------------------- #
-# Avalanche backend (multiclass only)
+# Avalanche backend (target only)
 # ---------------------------------------------------------------------- #
 def _run_avalanche(cfg, train, test, num_classes, shape, baseline, verbose) -> RunResult:
-    if cfg.mode != "multiclass":
-        raise NotImplementedError(
-            "the Avalanche backend supports mode='multiclass' only; "
-            "use the torch backend for target-vs-rest"
-        )
     from torch.utils.data import ConcatDataset
 
     from ..avalanche import (
@@ -270,9 +274,7 @@ def _run_avalanche(cfg, train, test, num_classes, shape, baseline, verbose) -> R
         rec["feature_expansion"] = next((x for x in exps if x["kind"] == "feature"), None)
         rec["output_expansion"] = next((x for x in exps if x["kind"] == "output"), None)
         rec.update(
-            evaluate_state(
-                model, test_all, n_classes, "multiclass", seen, None, t.eval_mb_size, device
-            )
+            evaluate_state(model, test_all, n_classes, "target", seen, None, t.eval_mb_size, device)
         )
         rec.update(
             seen_classes=list(seen),
@@ -289,13 +291,11 @@ def _run_avalanche(cfg, train, test, num_classes, shape, baseline, verbose) -> R
         rec["block_contribution"] = model.block_contribution(test_all[0][0][None].to(device))
         recs.append(rec)
         if verbose:
-            _print_row(rec, "multiclass")
+            _print_row(rec, "target")
     cfg.name = cfg.name or cfg.auto_name()
     if baseline and not cfg.name.startswith("avalanche_"):
         cfg.name = f"avalanche_{baseline}_{cfg.name}"
-    return RunResult(
-        cfg.to_dict(), collect_environment(), "multiclass", n_classes, seen, first, recs
-    )
+    return RunResult(cfg.to_dict(), collect_environment(), "target", n_classes, seen, first, recs)
 
 
 # ---------------------------------------------------------------------- #
@@ -306,6 +306,7 @@ def add_common_args(
     default_dataset: str,
     *,
     include_target_ratio: bool = True,
+    ratio_default: str | None = None,
 ) -> None:
     p.add_argument("--config", help="YAML config (CLI flags and --set override it)")
     p.add_argument(
@@ -317,7 +318,9 @@ def add_common_args(
         help="generic override, e.g. --set train.lr=0.05",
     )
     p.add_argument(
-        "--dataset", default=None, help=f"synthetic|cifar10|cifar100 (default {default_dataset})"
+        "--dataset",
+        default=None,
+        help=f"synthetic|digits|digitpairs|cifar10|cifar100 (default {default_dataset})",
     )
     p.add_argument("--root", default=None, help="dataset root")
     p.add_argument("--n-experiences", type=int)
@@ -337,14 +340,17 @@ def add_common_args(
     p.add_argument("--name")
     if include_target_ratio:
         p.add_argument(
-            "--target-to-negatives",
-            type=float,
+            "--ratio",
+            default=ratio_default,
+            metavar="TARGET:NEGATIVE",
             help=(
-                "target:negative training ratio (target mode only): "
-                "0.2 = 1 target : 5 negatives, 1 = 1:1; "
-                "omit to keep cumulative negative sampling"
+                "training ratio target:negative, e.g. 1:5 (one target per five negatives), 1:1, "
+                "5:1; 'cumulative' keeps every cumulative negative"
+                + (f" (default {ratio_default})" if ratio_default else " (default: cumulative)")
             ),
         )
+        # deprecated spelling of --ratio (targets per negative as a number); kept for old scripts
+        p.add_argument("--target-to-negatives", type=float, help=argparse.SUPPRESS)
     p.add_argument("--no-plots", action="store_true")
 
 
@@ -367,7 +373,7 @@ _FLAG_TO_KEY = {
     "output_dir": "output_dir",
     "name": "name",
     "target_to_negatives": "target_to_negatives",
-}
+}  # (a parsed --ratio is stored in args.target_to_negatives by config_from_args)
 
 
 def config_from_args(args: argparse.Namespace, mode: str, default_dataset: str) -> ExperimentConfig:
@@ -382,8 +388,16 @@ def config_from_args(args: argparse.Namespace, mode: str, default_dataset: str) 
         for k, v in loaded.items():
             d[k] = {**d[k], **v} if isinstance(v, dict) and isinstance(d.get(k), dict) else v
     d["mode"] = mode
-    if mode != "target" and getattr(args, "target_to_negatives", None) is not None:
-        raise ValueError("--target-to-negatives only applies to target-vs-rest (mode 'target')")
+    ratio_text = getattr(args, "ratio", None)
+    legacy_ratio = getattr(args, "target_to_negatives", None)
+    if ratio_text is not None and legacy_ratio is not None:
+        raise ValueError("use either --ratio or --target-to-negatives, not both")
+    if mode != "target" and (ratio_text is not None or legacy_ratio is not None):
+        raise ValueError("--ratio only applies to target-vs-rest (mode 'target')")
+    if ratio_text is not None:
+        args.target_to_negatives = parse_ratio(ratio_text)  # None for 'cumulative'
+        if args.target_to_negatives is None:
+            d["target_to_negatives"] = None
     if args.dataset is None and not in_cfg:
         d["data"]["dataset"] = default_dataset
     flags = [

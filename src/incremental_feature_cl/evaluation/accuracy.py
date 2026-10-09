@@ -19,14 +19,16 @@ def predict_dataset(
     mode: str,
     batch_size: int = 256,
     device: str | torch.device = "cpu",
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return (decisions, labels).  The model sees ``x`` only.
+    return_scores: bool = False,
+):
+    """Return ``(decisions, labels)``; with ``return_scores`` also the raw target logits.
 
-    multiclass: decision = argmax logit.   target: decision = 1[logit_0 > 0] (sigmoid > 0.5).
+    The model sees ``x`` only.  target: decision = 1[logit_0 > 0] (sigmoid > 0.5); the extra
+    ``scores`` output is ``logit_0`` (target mode only, ``None`` otherwise).
     """
     was_training = model.training
     model.eval()
-    preds, labels = [], []
+    preds, labels, scores = [], [], []
     for batch in DataLoader(dataset, batch_size=batch_size, shuffle=False):
         x, y = batch[0].to(device), batch[1]
         logits = model(x)  # <- labels are never passed to the model
@@ -34,8 +36,13 @@ def predict_dataset(
             (logits[:, 0] > 0).long().cpu() if mode == "target" else logits.argmax(1).cpu()
         )
         labels.append(y)
+        if mode == "target":
+            scores.append(logits[:, 0].float().cpu())
     model.train(was_training)
-    return torch.cat(preds).numpy(), torch.cat(labels).numpy()
+    decisions, labels_np = torch.cat(preds).numpy(), torch.cat(labels).numpy()
+    if not return_scores:
+        return decisions, labels_np
+    return decisions, labels_np, (torch.cat(scores).numpy() if scores else None)
 
 
 def correctness(

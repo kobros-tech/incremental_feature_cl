@@ -20,7 +20,7 @@ def test_forward_signature_takes_only_inputs(conv_model):
 def test_labels_do_not_influence_predictions(synth, conv_model):
     _, test = synth
     conv_model.expand_outputs(7)
-    for mode in ("multiclass", "target"):
+    for mode in "target":
         p0, _ = predict_dataset(conv_model, test, mode)
         shuffled = ArrayDataset(test.x, np.random.default_rng(0).permutation(test.targets.numpy()))
         wrong = ArrayDataset(test.x, np.zeros(len(test), dtype=int))
@@ -34,7 +34,7 @@ def test_state_unchanged_by_evaluation(synth, conv_model):
     conv_model.expand_outputs(7)
     before = {k: v.clone() for k, v in conv_model.state_dict().items()}
     n_log = len(conv_model.expansion_log)
-    evaluate_state(conv_model, test, 10, "multiclass", list(range(10)))
+    evaluate_state(conv_model, test, 10, "target", list(range(10)))
     assert len(conv_model.expansion_log) == n_log  # evaluation never expands / routes
     for k, v in conv_model.state_dict().items():
         assert torch.equal(before[k], v)

@@ -4,7 +4,6 @@
 # Reference Avalanche methods:  --avalanche-baselines naive,replay,er_ace,ewc
 # Planned matrix (run_sweep --preset cifar100-matrix):
 #   n_experiences {5,10,20} x new_feature_dim {0,4,16,32} x initialization {zero,random}
-mode: multiclass
 seed: 1
 output_dir: results
 data: {dataset: cifar100, root: ./data, n_experiences: 5}

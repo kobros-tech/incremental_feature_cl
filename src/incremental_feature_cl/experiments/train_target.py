@@ -7,8 +7,12 @@
         --train-epochs 5 --seed 1
 
 ``--target-class`` accepts several ids or ``all`` (a full sweep prints an estimate and needs ``--yes``).
-``--target-to-negatives R`` subsamples the cumulative negatives to R targets per negative
-(``0.2`` = 1 target : 5 negatives); omit it to keep all cumulative negatives.
+``--ratio TARGET:NEGATIVE`` subsamples the cumulative negatives (``1:5`` = one target per five
+negatives, ``1:1``, ``5:1``); omit it, or pass ``cumulative``, to keep all cumulative negatives.
+
+Read the log with care: ``acc_seen`` is the accuracy of the binary decision over ALL seen test
+samples, so with K seen classes it is dominated by the (K-1)/K negatives.  Judge the model by
+``target_acc`` (recall), ``neg_acc``, ``bal_acc`` = their mean, and the threshold-free ``auc``.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import copy
 import csv
 from pathlib import Path
 
+from ..data.streams import format_ratio
 from .common import (
     add_common_args,
     config_from_args,
@@ -30,7 +35,9 @@ from .common import (
 
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,  # e.g. "--replay 3" must not silently mean --replay-mem-size
     )
     add_common_args(p, "cifar100")
     p.add_argument("--target-class", nargs="+", default=["0"], metavar="K|all")
@@ -57,7 +64,7 @@ def main(argv=None) -> None:
         print(
             f"dataset={cfg.data.dataset} targets={len(targets)} n_experiences={cfg.data.n_experiences} "
             f"epochs={cfg.train.train_epochs} new_feature_dim={cfg.model.new_feature_dim} "
-            f"init={cfg.model.initialization} target_to_negatives={cfg.target_to_negatives} "
+            f"init={cfg.model.initialization} ratio={format_ratio(cfg.target_to_negatives)} "
             f"device={cfg.train.device}"
         )
         print(

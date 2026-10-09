@@ -9,7 +9,7 @@ Built-in controlled variants (same trainer, same seed, same data):
   4 expand-zero       new_feature_dim=D, zero init       <- proposed method
   5 expand-zero+replay
 
-Optional reference methods from Avalanche (multiclass mode, ``--avalanche-baselines naive,replay,er_ace,ewc``).
+Optional reference methods from Avalanche (target mode, ``--avalanche-baselines naive,replay,er_ace,ewc``).
 Writes comparison.csv/json and comparison.png under ``<output-dir>/<name>/``.
 """
 
@@ -51,7 +51,7 @@ def main(argv=None) -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     add_common_args(p, "cifar100")
-    p.add_argument("--mode", choices=["multiclass", "target"], default="multiclass")
+    p.add_argument("--mode", choices=["target"], default="target")
     p.add_argument("--target-class", type=int, default=0)
     p.add_argument(
         "--replay", type=int, default=200, help="replay memory size for the replay variants"
@@ -74,7 +74,7 @@ def main(argv=None) -> None:
         rows.append({"method": label, **r.summary})
     for name in [x for x in a.avalanche_baselines.split(",") if x]:
         c = copy.deepcopy(cfg)
-        c.mode, c.backend, c.name = "multiclass", "avalanche", f"avalanche_{name}"
+        c.mode, c.backend, c.name = "target", "avalanche", f"avalanche_{name}"
         c.model.new_feature_dim = 0
         c.train.replay_mem_size = a.replay
         r = run_experiment(

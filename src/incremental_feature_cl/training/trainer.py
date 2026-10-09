@@ -35,7 +35,7 @@ from .replay import ReplayBuffer
 
 @dataclass
 class TrainerConfig:
-    mode: str = "multiclass"  # "multiclass" | "target"
+    mode: str = "target"
     optimizer: str = "sgd"
     lr: float = 0.01
     momentum: float = 0.9
@@ -178,7 +178,7 @@ class ContinualTrainer:
             rec["feature_dim_before_expansion"] = old_dim
 
             # (4) output growth (independent of the above)
-            orec = policy.expand_outputs(model, exp.classes if cfg.mode == "multiclass" else [])
+            orec = policy.expand_outputs(model, exp.classes if cfg.mode == "target" else [])
             rec["output_expansion"] = orec.to_dict() if orec else None
 
             # (5) train. Record what was actually trained on (the realized target:negative ratio)
