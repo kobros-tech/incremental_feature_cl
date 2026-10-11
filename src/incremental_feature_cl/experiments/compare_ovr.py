@@ -4,30 +4,33 @@
 
     python -m incremental_feature_cl.experiments.compare_ovr \
         --dataset cifar100 --n-experiences 5 --new-feature-dim 16 --train-epochs 2 \
-        --ratio 1:5 --memory-per-class 100 --seed 1 --vs-target 0 17 50
+        --ratio 1:5 --memory-per-class 100 --seed 1 --vs-target 0 17 50 --vs-sklearn replay
 
 Every class owns one persistent :class:`Skill` (class vs. the other seen classes).  After each
 experience ALL skills are refreshed: the new classes become negatives of every old skill (and the
-old classes negatives of every new skill), on top of each skill's replay memory.
+old classes negatives of every new skill), on top of each skill's replay memory.  The log line of
+every experience proves it (``refreshed 80/80 old skills (negatives: new classes 100%, old classes
+100% ...)``).
 
-How a skill is scored.  Each skill is judged like a ``train_target`` run with that class as
-target: its own decision (``logit > 0``) on the test samples of its class (positives) and of the
-other seen classes (negatives).  The headline numbers are therefore means over skills of
-``recall``, ``neg_acc`` (specificity), ``bal_acc`` = (recall + neg_acc) / 2, ``f1`` and the
-threshold-free ``auc``.  ``argmax_acc`` (multiclass accuracy of the arg-max over independent skill
-logits) is printed only as a diagnostic: those logits were never trained to be compared with each
-other, so it is far lower than the per-skill numbers and is NOT comparable with ``train_target``'s
-``acc_seen`` (which is a target-vs-rest accuracy, dominated by the negatives).
+The skills are configured with the same flags as ``train_target`` (``--new-feature-dim``,
+``--activation``, ``--initialization``, ``--output-init``, ``--freeze-old-blocks``,
+``--optimizer``, ``--lr`` ...), i.e. the same options as ``IncrementalFeatureMapModel``.
+
+How a skill is scored: see ``ovr_runner``.  The headline numbers are means over skills of the
+per-skill target-vs-rest metrics (``recall``, ``neg_acc``, ``bal_acc``, ``f1``, ``auc``);
+``argmax_acc`` is only a diagnostic.  Because independent skills are not trained to be compared,
+``--comparison-weight W`` (> 0) adds a joint *comparison phase* after each experience that trains
+all skills on the replay exemplars with a softmax cross-entropy over skills (plus a per-skill
+binary loss), which is what makes ``argmax_acc`` meaningful.
 
 ``--vs-target K ...`` additionally runs ``train_target`` (IncrementalFeatureMapModel) for those
-classes with the same data / seed / ratio and prints both side by side.  Protocol differences:
-the target-mode run re-trains every experience on the full cumulative negative pool (sub-sampled
-by ``--ratio``), while a skill only sees new data plus ``--memory-per-class`` exemplars per class,
-so the target-mode run is the more generous of the two.
+classes and ``--vs-sklearn replay cumulative`` runs the scikit-learn controls
+(``sklearn_control``) on the same data/seed/ratio, and prints everything side by side.  Protocol
+differences: target mode and ``cumulative`` re-train every experience on the full cumulative
+negative pool, while a skill (and ``replay``) only sees new data plus ``--memory-per-class``
+exemplars per class.
 
-Skills replay *features*, so the backbone is always frozen here.  What limits a skill is the data
-of its refreshes (``--memory-per-class`` positives and ``--ratio`` times as many negatives), not
-the model: with enough exemplars it reaches the target-mode numbers.
+Skills replay *features*, so the backbone is always frozen here.
 """
 
 from __future__ import annotations
@@ -35,34 +38,23 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import math
-import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 import numpy as np
-import torch
-from torch.utils.data import DataLoader
 
-from ..data import build_class_incremental_stream
-from ..evaluation import argmax_accuracy, macro_metrics, per_skill_metrics
-from ..evaluation.result_store import RunResult
-from ..models import OneVsRestSkillModel, SkillConfig
-from ..plotting import (
-    plot_accuracy_heatmap,
-    plot_accuracy_vs_class,
-    plot_accuracy_vs_experience,
-    plot_class_accuracy_curves,
-    plot_feature_growth,
-    plot_forgetting_vs_class,
-)
-from ..utils.reproducibility import collect_environment, resolve_device, seed_everything
-from .common import add_common_args, build_model, config_from_args, get_data
+from ..models import ComparisonConfig, OneVsRestSkillModel, SkillConfig
+from ..models.skill import EXPANSIONS
+from .common import add_common_args, config_from_args
 from .common import run_experiment as run_target_experiment
+from .ovr_runner import run_ovr_experiment
+
+_COLUMNS = ("balanced_accuracy", "target_recall", "negative_accuracy", "target_f1", "auc")
+_HEADERS = ("bal", "recall", "neg", "f1", "auc")
 
 
-def _skill_config(cfg, args: argparse.Namespace) -> SkillConfig:
+def skill_config_from(cfg, args: argparse.Namespace) -> SkillConfig:
+    """Map the shared experiment config (ModelConfig / TrainConfig) onto a SkillConfig."""
     if args.skill_pos_weight == "none":
         pos_weight: str | float | None = None
     elif args.skill_pos_weight == "balanced":
@@ -75,67 +67,89 @@ def _skill_config(cfg, args: argparse.Namespace) -> SkillConfig:
         weight_decay=cfg.train.weight_decay,
         epochs=cfg.train.train_epochs,
         batch_size=cfg.train.train_mb_size,
+        optimizer=cfg.train.optimizer,
+        max_iter=args.skill_max_iter,
         feature_expansion_dim=cfg.model.new_feature_dim,
+        activation=cfg.model.activation,
+        initialization=cfg.model.initialization,
+        output_init=cfg.model.output_init,
+        freeze_old_blocks=cfg.model.freeze_old_blocks,
+        expansion=args.skill_expansion,
         target_to_negatives=cfg.target_to_negatives,
         pos_weight=pos_weight,
         memory_per_class=args.memory_per_class,
     )
 
 
-def _materialize(dataset, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Read through ``Dataset.__getitem__`` so uint8 images are converted and normalized."""
-    xs, ys = [], []
-    for x, y in DataLoader(dataset, batch_size=batch_size, shuffle=False):
-        xs.append(x)
-        ys.append(y)
-    return torch.cat(xs), torch.cat(ys)
+def comparison_config_from(args: argparse.Namespace) -> ComparisonConfig:
+    return ComparisonConfig(
+        weight=args.comparison_weight,
+        bce_weight=args.comparison_bce_weight,
+        epochs=args.comparison_epochs,
+        batch_size=args.comparison_batch_size,
+        lr=args.comparison_lr,
+    )
 
 
-def refresh_report(info: dict[str, Any], seen: list[int], new_classes: list[int]) -> dict[str, Any]:
-    """Did this experience actually refresh the old skills? (derived from ``model.update``'s record)"""
-    old = list(info["updated_old_skills"])
-    trained = [c for c in old if info["skills"][c].get("trained")]
-    coverage = []
-    for c in trained:
-        used = set(info["skills"][c].get("negatives_used_per_class", {}))
-        wanted = set(new_classes) - {c}
-        coverage.append(len(used & wanted) / len(wanted) if wanted else 1.0)
-    complete = all(set(known) == set(seen) - {c} for c, known in info["known_negatives"].items())
+def default_name(cfg, args: argparse.Namespace, prefix: str = "ovr") -> str:
+    ratio = args.ratio.replace(":", "-")
+    return (
+        f"{prefix}_{cfg.data.dataset}_e{cfg.data.n_experiences}_d{cfg.model.new_feature_dim}"
+        f"_r{ratio}_m{args.memory_per_class}_s{cfg.seed}"
+    )
+
+
+def run_experiment(cfg, args: argparse.Namespace, out_dir: Path, *, make_plots: bool = True):
+    """Train and score the Skill ensemble; save the result under ``out_dir``."""
+    skill_cfg = skill_config_from(cfg, args)
+    comparison = comparison_config_from(args)
+
+    def build(cfg_, backbone, device):
+        return OneVsRestSkillModel(
+            backbone, config=skill_cfg, seed=cfg_.seed, comparison=comparison
+        )
+
+    return run_ovr_experiment(
+        cfg,
+        out_dir,
+        build,
+        describe=f"ratio={args.ratio} memory/class={args.memory_per_class}"
+        + (f" comparison_weight={comparison.weight:g}" if comparison.enabled else ""),
+        config_extra={
+            "skill_config": asdict(skill_cfg),
+            "comparison_config": asdict(comparison),
+            "ratio": args.ratio,
+        },
+        make_plots=make_plots,
+    )
+
+
+# ---------------------------------------------------------------------- comparisons
+def _cell(m: dict, k: str) -> str:
+    return f"{m[k]:7.3f}" if m.get(k) is not None else "    n/a"
+
+
+def _mean(rows: list[dict]) -> dict:
     return {
-        "old_skills": len(old),
-        "old_skills_refreshed": len(trained),
-        "new_classes_in_old_skill_training": float(np.mean(coverage)) if coverage else None,
-        "min_new_class_coverage": float(min(coverage)) if coverage else None,
-        "every_skill_knows_all_other_seen_classes": complete,
-        "mean_positives_per_old_update": (
-            float(np.mean([info["skills"][c]["n_positive"] for c in trained])) if trained else None
-        ),
-        "mean_negatives_per_old_update": (
-            float(np.mean([info["skills"][c]["n_negative"] for c in trained])) if trained else None
-        ),
+        k: float(np.mean([r[k] for r in rows if r.get(k) is not None] or [np.nan]))
+        for k in _COLUMNS
     }
 
 
-def _format_row(rec: dict[str, Any]) -> str:
-    m, r = rec["target_metrics"], rec["refresh"]
-    auc = f"{m['auc']:.3f}" if m["auc"] is not None else "  n/a"
-    row = (
-        f"  exp {rec['index']:>2} skills={rec['number_of_skills']:<3} "
-        f"bal_acc={m['balanced_accuracy']:.3f} recall={m['target_recall']:.3f} "
-        f"neg_acc={m['negative_accuracy']:.3f} f1={m['target_f1']:.3f} auc={auc} "
-        f"| argmax_acc={rec['accuracy_seen']:.3f}"
+def _print_table(title: str, names: list[str], rows_by_name: dict[str, list[dict]], ids) -> None:
+    head = " ".join(f"{h:>7}" for h in _HEADERS)
+    print(f"\n{title}")
+    print(f"{'class':>6} | " + " | ".join(f"{n:^39}" for n in names))
+    print(f"{'':>6} | " + " | ".join(head for _ in names))
+    for i, c in enumerate(ids):
+        print(
+            f"{c:>6} | "
+            + " | ".join(" ".join(_cell(rows_by_name[n][i], k) for k in _COLUMNS) for n in names)
+        )
+    print(
+        f"{'mean':>6} | "
+        + " | ".join(" ".join(_cell(_mean(rows_by_name[n]), k) for k in _COLUMNS) for n in names)
     )
-    if r["old_skills"]:
-        row += f" | refreshed {r['old_skills_refreshed']}/{r['old_skills']} old skills"
-        if r["old_skills_refreshed"]:
-            row += (
-                f" (new classes in their negatives: {r['new_classes_in_old_skill_training']:.0%}, "
-                f"pos/neg per update: {r['mean_positives_per_old_update']:.0f}/"
-                f"{r['mean_negatives_per_old_update']:.0f})"
-            )
-    if rec["train_loss"] is not None:
-        row += f" | loss={rec['train_loss']:.4f}"
-    return row
 
 
 def _vs_target(cfg, per_skill: dict[int, dict], targets: list[int], out_dir: Path) -> list[dict]:
@@ -150,172 +164,63 @@ def _vs_target(cfg, per_skill: dict[int, dict], targets: list[int], out_dir: Pat
         run = run_target_experiment(
             c, out_dir=out_dir / "vs_target" / f"target_{k}", make_plots=False, verbose=False
         )
-        tm = run.experiences[-1]["target_metrics"]
-        rows.append({"class": k, "skill": per_skill[k], "target_run": tm})
-
-    keys = ("balanced_accuracy", "target_recall", "negative_accuracy", "target_f1", "auc")
-    cols = ("bal", "recall", "neg", "f1", "auc")
-    head = " ".join(f"{h:>7}" for h in cols)
-    print("\nfinal experience, target-vs-rest over all seen classes:")
-    print(f"{'':>6} | {'Skill':^39} | IncrementalFeatureMapModel (target mode)")
-    print(f"{'class':>6} | {head} | {head}")
-
-    def cell(m: dict, k: str) -> str:
-        return f"{m[k]:7.3f}" if m.get(k) is not None else "    n/a"
-
-    for r in rows:
-        left = " ".join(cell(r["skill"], k) for k in keys)
-        right = " ".join(cell(r["target_run"], k) for k in keys)
-        print(f"{r['class']:>6} | {left}   | {right}")
-    mean = {
-        side: {
-            k: float(np.mean([x[side][k] for x in rows if x[side].get(k) is not None] or [np.nan]))
-            for k in keys
-        }
-        for side in ("skill", "target_run")
-    }
-    print(
-        f"{'mean':>6} | {' '.join(cell(mean['skill'], k) for k in keys)}   "
-        f"| {' '.join(cell(mean['target_run'], k) for k in keys)}"
+        rows.append(
+            {"class": k, "skill": per_skill[k], "target_run": run.experiences[-1]["target_metrics"]}
+        )
+    _print_table(
+        "final experience, target-vs-rest over all seen classes (Skill vs target mode):",
+        ["skill", "target_run"],
+        {"skill": [r["skill"] for r in rows], "target_run": [r["target_run"] for r in rows]},
+        targets,
     )
     return rows
 
 
-def run_experiment(cfg, args: argparse.Namespace, out_dir: Path) -> RunResult:
-    cfg.train.device = str(resolve_device(cfg.train.device))
-    cfg.model.freeze_backbone = True  # skills replay features
-    device = torch.device(cfg.train.device)
-    seed_everything(cfg.seed)
+def _vs_sklearn(cfg, args, skill_result, protocols: list[str], out_dir: Path) -> dict:
+    from .sklearn_control import build_sklearn_model
 
-    train, test, num_classes, shape = get_data(cfg)
-    if cfg.data.dataset == "synthetic" and "n_classes" not in cfg.data.synthetic:
-        n = cfg.data.n_experiences
-        cfg.data.synthetic = {**cfg.data.synthetic, "n_classes": max(10, math.ceil(10 / n) * n)}
-        train, test, num_classes, shape = get_data(cfg)
+    only = args.vs_target or None
+    skill_cfg = skill_config_from(cfg, args)
+    final_skill = skill_result.experiences[-1]["per_skill_metrics"]
+    ids = sorted(only) if only else sorted(final_skill)
+    rows_by_name = {"skill": [final_skill[c] for c in ids]}
+    summary = {}
+    for protocol in protocols:
+        c = copy.deepcopy(cfg)
+        c.name = f"sklearn_{protocol}_{cfg.name}"
 
-    stream = build_class_incremental_stream(
-        train, test, cfg.data.n_experiences, cfg.seed, cfg.data.class_order
-    )
-    backbone = build_model(cfg, shape, num_outputs=1).backbone.to(device)
-    skill_cfg = _skill_config(cfg, args)
-    model = OneVsRestSkillModel(backbone, config=skill_cfg, seed=cfg.seed).to(device)
-
-    # The representation is frozen, so the test features are computed once.
-    x_test, y_test = _materialize(test, cfg.train.eval_mb_size)
-    h_test = model.extract(x_test.to(device)).cpu()
-    labels = y_test.numpy()
-
-    cfg.name = cfg.name or _default_name(cfg, args)
-    result_cfg = cfg.to_dict()
-    result_cfg["skill_config"] = asdict(skill_cfg)
-    result_cfg["ratio"] = args.ratio
-    records: list[dict[str, Any]] = []
-
-    print(
-        f"[{cfg.name}] dataset={cfg.data.dataset} experiences={cfg.data.n_experiences} "
-        f"device={device} ratio={args.ratio} memory/class={args.memory_per_class}",
-        flush=True,
-    )
-    for exp in stream.train:
-        started = time.time()
-        x, y = _materialize(exp.dataset, cfg.train.train_mb_size)
-        info = model.update(x, y, device=device)
-        train_time = time.time() - started
-
-        seen = stream.seen_classes(exp.index)
-        with torch.no_grad():
-            scores = model.decision_function_features(h_test.to(device)).cpu().numpy()
-        per_skill = per_skill_metrics(scores, labels, model.class_ids, seen)
-        macro = macro_metrics(per_skill)
-        argmax_seen = argmax_accuracy(scores, labels, model.class_ids, seen)
-        predicted = np.asarray(model.class_ids)[scores.argmax(axis=1)]
-        refresh = refresh_report(info, seen, exp.new_classes)
-
-        losses = [
-            v["train_loss"]
-            for v in info["skills"].values()
-            if v.get("trained") and v.get("train_loss") is not None
-        ]
-        skill_dims = {c: s.model.feature_dim for c, s in model.skills.items()}
-        record = {
-            "index": exp.index,
-            "classes": exp.classes,
-            "new_classes": exp.new_classes,
-            "seen_classes": seen,
-            "train_loss": float(np.mean(losses)) if losses else None,
-            "train_time_s": train_time,
-            # per_class_accuracy[c] = balanced accuracy of the skill of class c (None if unseen)
-            "per_class_accuracy": [
-                per_skill[c]["balanced_accuracy"] if c in per_skill else None
-                for c in range(num_classes)
-            ],
-            # mean over skills of the per-skill target-vs-rest metrics (the headline numbers)
-            "target_metrics": macro,
-            "per_skill_metrics": per_skill,
-            # arg-max over independent skill logits: diagnostic only
-            "accuracy_seen": argmax_seen,
-            "accuracy_all": float((predicted == labels).mean()),
-            "refresh": refresh,
-            "feature_dim": max(skill_dims.values(), default=model.feature_dim),
-            "shared_feature_dim": model.feature_dim,
-            "skill_feature_dims": skill_dims,
-            "number_of_classifiers": model.num_skills,
-            "number_of_skills": info["number_of_skills"],
-            "new_skills": info["new_skills"],
-            "updated_old_skills": info["updated_old_skills"],
-            "known_negative_classes_per_skill": info["known_negatives"],
-            "replay_count_per_skill": info["replay_count"],
-            "skill_training": info["skills"],
-            "parameter_count": model.parameter_count(),
-            "trainable_parameter_count": info["trainable_parameter_count"],
-        }
-        records.append(record)
-        print(_format_row(record), flush=True)
-        if refresh["old_skills_refreshed"] < refresh["old_skills"]:
-            print(
-                "  WARNING: some old skills were not updated (a skill without any stored positive "
-                "exemplar cannot be refreshed: use --memory-per-class > 0)",
-                flush=True,
+        def build(cfg_, backbone, device, protocol=protocol):
+            return build_sklearn_model(
+                protocol,
+                backbone,
+                skill_cfg,
+                cfg_.seed,
+                C=args.sklearn_c,
+                max_iter=args.sklearn_max_iter,
+                only_classes=only if protocol == "cumulative" else None,
             )
-        if not refresh["every_skill_knows_all_other_seen_classes"]:
-            print("  WARNING: a skill does not know every other seen class", flush=True)
 
-    result = RunResult(
-        result_cfg,
-        collect_environment(),
-        "target",  # every skill is a target-vs-rest learner; plots/summaries read target_metrics
-        num_classes,
-        stream.class_order,
-        stream.class_first_experience(),
-        records,
+        res = run_ovr_experiment(
+            c,
+            out_dir / "vs_sklearn" / protocol,
+            build,
+            describe=f"[sklearn {protocol}]",
+            config_extra={"sklearn_protocol": protocol, "C": args.sklearn_c},
+            make_plots=False,
+        )
+        per = res.experiences[-1]["per_skill_metrics"]
+        rows_by_name[f"sklearn_{protocol}"] = [per[k] for k in ids]
+        summary[protocol] = {k: per[k] for k in ids}
+    _print_table(
+        "final experience, target-vs-rest over all seen classes (Skill vs scikit-learn):",
+        list(rows_by_name),
+        rows_by_name,
+        ids,
     )
-    result.compute_summary()
-    result.save(out_dir)
-    if not args.no_plots:
-        plots = out_dir / "plots"
-        plot_accuracy_vs_experience(result, plots / "A_accuracy_vs_experience.png")
-        plot_accuracy_vs_class(result, plots / "B_accuracy_vs_class.png")
-        plot_accuracy_heatmap(result, plots / "C_class_accuracy_heatmap.png")
-        plot_class_accuracy_curves(result, plots / "D_class_accuracy_curves.png")
-        plot_forgetting_vs_class(result, plots / "E_forgetting_vs_class.png")
-        plot_feature_growth(result, plots / "F_feature_growth.png")
-
-    s = result.summary
-    auc = f" final_auc={s['final_auc']:.3f}" if s.get("final_auc") is not None else ""
-    print(
-        f"[{cfg.name}] final_bal_acc={s['final_balanced_accuracy']:.3f}{auc} "
-        f"final_f1={s['final_target_f1']:.3f} final_argmax_acc={s['final_accuracy_seen']:.3f} "
-        f"avg_forgetting(bal_acc per skill)={s['average_forgetting']:.3f} -> {out_dir}",
-        flush=True,
-    )
-
-    if args.vs_target:
-        rows = _vs_target(cfg, records[-1]["per_skill_metrics"], args.vs_target, out_dir)
-        (out_dir / "vs_target.json").write_text(json.dumps(rows, indent=2, default=float))
-    return result
+    return summary
 
 
-def main(argv=None) -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -338,26 +243,68 @@ def main(argv=None) -> None:
         help="balanced, none, or a numeric BCE positive-class weight",
     )
     parser.add_argument(
+        "--skill-max-iter",
+        type=int,
+        default=100,
+        help="L-BFGS iterations per update (only with --set train.optimizer=lbfgs)",
+    )
+    parser.add_argument(
+        "--skill-expansion",
+        choices=EXPANSIONS,
+        default="first",
+        help="when a skill grows its feature space by --new-feature-dim: once at its first "
+        "update (first), before every update (every), before every update except the first "
+        "(later, like the target-mode trainer) or never",
+    )
+    parser.add_argument(
+        "--comparison-weight",
+        type=float,
+        default=0.0,
+        help="weight of the softmax cross-entropy over skills in the joint comparison phase "
+        "(0 = off: skills stay independent)",
+    )
+    parser.add_argument("--comparison-bce-weight", type=float, default=1.0)
+    parser.add_argument("--comparison-epochs", type=int, default=1)
+    parser.add_argument("--comparison-batch-size", type=int, default=64)
+    parser.add_argument("--comparison-lr", type=float, default=None)
+    parser.add_argument(
         "--vs-target",
         type=int,
         nargs="+",
         metavar="CLASS",
         help="also run train_target (IncrementalFeatureMapModel) for these classes and compare",
     )
+    parser.add_argument(
+        "--vs-sklearn",
+        nargs="+",
+        choices=("replay", "cumulative"),
+        metavar="PROTOCOL",
+        help="also run the scikit-learn controls (replay: the Skills' data protocol; cumulative: "
+        "all seen data, only for the --vs-target classes if given)",
+    )
+    parser.add_argument("--sklearn-c", type=float, default=1.0, help="LogisticRegression C")
+    parser.add_argument("--sklearn-max-iter", type=int, default=200)
+    return parser
+
+
+def main(argv=None) -> None:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.memory_per_class < 0:
         parser.error("--memory-per-class must be >= 0")
     cfg = config_from_args(args, "target", "cifar100")
     cfg.model.freeze_backbone = True
-    cfg.name = cfg.name or _default_name(cfg, args)
-    run_experiment(cfg, args, Path(cfg.output_dir) / cfg.name)
+    cfg.name = cfg.name or default_name(cfg, args)
+    out_dir = Path(cfg.output_dir) / cfg.name
+    result = run_experiment(cfg, args, out_dir, make_plots=not args.no_plots)
 
-
-def _default_name(cfg, args) -> str:
-    return (
-        f"ovr_{cfg.data.dataset}_e{cfg.data.n_experiences}_d{cfg.model.new_feature_dim}"
-        f"_r{args.ratio.replace(':', '-')}_m{args.memory_per_class}_s{cfg.seed}"
-    )
+    final = result.experiences[-1]["per_skill_metrics"]
+    if args.vs_target:
+        rows = _vs_target(cfg, final, args.vs_target, out_dir)
+        (out_dir / "vs_target.json").write_text(json.dumps(rows, indent=2, default=float))
+    if args.vs_sklearn:
+        summary = _vs_sklearn(cfg, args, result, args.vs_sklearn, out_dir)
+        (out_dir / "vs_sklearn.json").write_text(json.dumps(summary, indent=2, default=float))
 
 
 if __name__ == "__main__":

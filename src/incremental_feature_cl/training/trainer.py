@@ -144,6 +144,30 @@ class ContinualTrainer:
         return total / max(n, 1)
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _negative_coverage(
+        labels, target_class: int, seen_before: list[int], new_classes: list[int]
+    ) -> dict[str, Any]:
+        """Which negative classes the experience's training data actually contains.
+
+        ``old`` = negative classes introduced by earlier experiences, ``new`` = introduced by this
+        one.  ``complete`` is True when every old and every new negative class is present, i.e. the
+        target is trained against both old and new negatives.
+        """
+        old = [c for c in seen_before if c != target_class]
+        new = [c for c in new_classes if c != target_class]
+        present = {int(c) for c in np.unique(labels)}
+        old_covered, new_covered = len(present & set(old)), len(present & set(new))
+        return {
+            "old_negative_classes": len(old),
+            "old_covered": old_covered,
+            "new_negative_classes": len(new),
+            "new_covered": new_covered,
+            "n_old_negative_samples": int(np.isin(labels, old).sum()),
+            "n_new_negative_samples": int(np.isin(labels, new).sum()),
+            "complete": old_covered == len(old) and new_covered == len(new),
+        }
+
     def fit(
         self, stream: Stream, callback: Callable[[dict], None] | None = None
     ) -> list[dict[str, Any]]:
@@ -195,6 +219,9 @@ class ContinualTrainer:
                         rec["n_train_negative"],
                         stream.target_to_negatives,
                     )
+                )
+                rec["negative_coverage"] = self._negative_coverage(
+                    labels, stream.target_class, seen_before, exp.new_classes
                 )
             rec["train_loss"] = self._train_experience(exp)
             rec["train_time_s"] = time.time() - t0

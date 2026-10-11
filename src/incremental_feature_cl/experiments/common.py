@@ -131,6 +131,13 @@ def _print_row(rec: dict, mode: str) -> None:
         )
         if tm.get("auc") is not None:
             extra += f" auc={tm['auc']:.3f}"
+        cov = rec.get("negative_coverage")
+        if cov:
+            extra += (
+                f" negs(old {cov['old_covered']}/{cov['old_negative_classes']}"
+                f" new {cov['new_covered']}/{cov['new_negative_classes']}"
+                f"{'' if cov['complete'] else ' INCOMPLETE'})"
+            )
     probe = rec.get("probe")
     pr = f" |dlogit|={probe['logit_max_abs_diff_expansion']:.1e}" if probe else ""
     print(

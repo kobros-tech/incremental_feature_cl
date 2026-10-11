@@ -118,6 +118,28 @@ def build_class_incremental_stream(train, test, n_experiences, seed=0, class_ord
     return Stream(exps, test, num_classes, order)
 
 
+def stratified_quota(sizes: dict[int, int], n: int, rng: np.random.Generator) -> dict[int, int]:
+    """How many rows to take from each class when drawing ``n`` rows without replacement.
+
+    Water-filling: every class gets +1 per round (in a seeded random order) until the budget or
+    the class pools run out, so the draw is as even as the pools allow and every class is
+    represented whenever ``n >= number of classes``.  Shared by the target-vs-rest stream and by
+    the skills' replay sampling, so both models draw negatives by the same rule.
+    """
+    classes = sorted(sizes)
+    quota = {c: 0 for c in classes}
+    order = list(rng.permutation(classes))  # deterministic tie-break
+    remaining = min(int(n), sum(sizes.values()))
+    while remaining > 0:
+        for c in order:
+            if remaining == 0:
+                break
+            if quota[c] < sizes[c]:
+                quota[c] += 1
+                remaining -= 1
+    return quota
+
+
 def validate_target_to_negatives(target_to_negatives: float | None) -> float | None:
     """Return the ratio as a float (or ``None``); raise ``ValueError`` unless it is ``None`` or > 0."""
     if target_to_negatives is None:
@@ -226,8 +248,9 @@ def build_target_vs_rest_stream(
       Targets are never subsampled or duplicated. Negatives are never duplicated either: if the
       pool holds fewer negatives than requested, all of them are kept, so the requested ratio is an
       *upper bound on negatives per target* and the realized ratio can be less negative-heavy in
-      early experiences (see ``ratio_report``). The draw is deterministic given ``seed`` and the
-      experience index.
+      early experiences (see ``ratio_report``). The draw is class-balanced over every negative
+      class seen so far (``stratified_quota``): old and new negatives are both always present,
+      none can be sampled away. It is deterministic given ``seed`` and the experience index.
       Experiences without target samples (``target_in_every_experience=False``, ``i > 0``) have no
       ratio to enforce and keep the whole pool.
     """
@@ -269,12 +292,18 @@ def build_target_vs_rest_stream(
 
         negative_data = _select_classes(train, seen_negs)
         if n_negative is not None and has_target and len(negative_data) > n_negative:
-            # seed + i: deterministic per (seed, experience); kept stable so earlier runs reproduce
+            # Class-balanced draw over ALL negative classes seen so far (old and new): none can be
+            # sampled away.  Deterministic per (seed, experience).
             rng = np.random.default_rng(seed + i)
-            indices = torch.as_tensor(
-                rng.choice(len(negative_data), size=n_negative, replace=False),
-                dtype=torch.long,
-            )
+            labels = negative_data.targets.cpu().numpy()
+            sizes = {c: int((labels == c).sum()) for c in seen_negs}
+            quota = stratified_quota(sizes, n_negative, rng)
+            picked = [
+                rng.choice(np.flatnonzero(labels == c), size=q, replace=False)
+                for c, q in quota.items()
+                if q
+            ]
+            indices = torch.as_tensor(np.sort(np.concatenate(picked)), dtype=torch.long)
             negative_data = ArrayDataset(
                 negative_data.x[indices],
                 negative_data.targets[indices],
