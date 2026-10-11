@@ -1,5 +1,4 @@
 # Smallest end-to-end run: synthetic data, CPU, seconds.
-mode: multiclass
 backend: torch
 seed: 1
 output_dir: results

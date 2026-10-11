@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Milestone 1b: smallest end-to-end neural experiment (synthetic data, CPU, seconds, no downloads).
 
-    python -m incremental_feature_cl.experiments.synthetic_demo [--mode target|multiclass]
+    python -m incremental_feature_cl.experiments.synthetic_demo [--mode target]
 
 Runs zero- vs random-initialised expansion and prints the preservation check
 (max |logit change| caused by expansion; exactly 0 for zero initialisation).
@@ -16,7 +16,7 @@ from .config import ExperimentConfig
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["multiclass", "target"], default="multiclass")
+    ap.add_argument("--mode", choices=["target"], default="target")
     ap.add_argument("--output-dir", default="results")
     a = ap.parse_args(argv)
     for init in ("zero", "random"):

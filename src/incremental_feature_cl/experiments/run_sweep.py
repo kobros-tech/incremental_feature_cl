@@ -35,7 +35,7 @@ def main(argv=None) -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     add_common_args(p, "cifar100")
-    p.add_argument("--mode", choices=["multiclass", "target"], default="multiclass")
+    p.add_argument("--mode", choices=["target"], default="target")
     p.add_argument("--target-class", type=int, default=17)
     p.add_argument("--preset", choices=sorted(PRESETS))
     p.add_argument("--grid", action="append", default=[], metavar="KEY=V1,V2")

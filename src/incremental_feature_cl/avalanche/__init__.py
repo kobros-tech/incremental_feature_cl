@@ -5,6 +5,7 @@
 from .baselines import AVALANCHE_BASELINES, make_avalanche_baseline
 from .benchmark import make_split_cifar100, make_tensor_benchmark
 from .metrics import FeatureSpaceLogger
+from .ovr_strategy import OneVsRestSkillStrategy
 from .strategy import FeatureExpansionPlugin, IncrementalFeatureSpaceStrategy, quiet_evaluator
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "FeatureExpansionPlugin",
     "FeatureSpaceLogger",
     "IncrementalFeatureSpaceStrategy",
+    "OneVsRestSkillStrategy",
     "make_avalanche_baseline",
     "make_split_cifar100",
     "make_tensor_benchmark",

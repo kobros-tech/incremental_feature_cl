@@ -16,7 +16,7 @@ from ..data.streams import validate_target_to_negatives
 
 @dataclass
 class DataConfig:
-    dataset: str = "synthetic"  # synthetic | cifar10 | cifar100
+    dataset: str = "synthetic"  # synthetic | digits | digitpairs | cifar10 | cifar100
     root: str = "./data"
     n_experiences: int = 5
     class_order: list[int] | None = None
@@ -53,7 +53,7 @@ class TrainConfig:
 @dataclass
 class ExperimentConfig:
     name: str = ""
-    mode: str = "multiclass"  # multiclass | target
+    mode: str = "target"
     target_class: int = 0
     target_in_every_experience: bool = True
     # target-vs-rest data ratio (targets per negative; 0.2 = 1 target : 5 negatives).

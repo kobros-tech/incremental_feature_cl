@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
-"""Mode B: class-incremental multiclass classification (e.g. Split CIFAR-100, 20 x 5 classes).
+"""Mode B: class-incremental target classification (e.g. Split CIFAR-100, 20 x 5 classes).
 
     python -m incremental_feature_cl.experiments.train_cifar100 \\
         --dataset cifar100 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1
@@ -25,7 +25,7 @@ def main(argv=None) -> None:
         help="torch: built-in trainer (default). avalanche: Avalanche strategy + SplitCIFAR100",
     )
     a = p.parse_args(argv)
-    cfg = config_from_args(a, "multiclass", "cifar100")
+    cfg = config_from_args(a, "target", "cifar100")
     run_experiment(cfg, make_plots=not a.no_plots)
 
 

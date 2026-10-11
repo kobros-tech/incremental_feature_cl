@@ -1,5 +1,4 @@
 # Mode B: class-incremental Split CIFAR-100 (20 experiences x 5 classes).
-mode: multiclass
 backend: torch            # or: avalanche (SplitCIFAR100 + IncrementalFeatureSpaceStrategy)
 seed: 1
 output_dir: results

@@ -16,15 +16,22 @@ def plot_accuracy_vs_experience(result: RunResult, path):
     x = [e["index"] for e in result.experiences]
     if result.mode == "target":
         tm = [e["target_metrics"] for e in result.experiences]
+        who = (
+            f"target class {result.target_class}"
+            if result.target_class is not None
+            else "mean over skills"
+        )
         ax.plot(
             x,
             [m["target_accuracy"] for m in tm],
             "o-",
             lw=2.5,
-            label=f"target class {result.target_class} accuracy (recall)",
+            label=f"{who} accuracy (recall)",
         )
         ax.plot(x, [m["negative_accuracy"] for m in tm], "s--", label="seen-negative accuracy")
         ax.plot(x, [m["target_f1"] for m in tm], "^:", label="target F1")
+        if all(m.get("balanced_accuracy") is not None for m in tm):
+            ax.plot(x, [m["balanced_accuracy"] for m in tm], "d-.", label="balanced accuracy")
         ax.set_title("Target-vs-rest: target accuracy vs experience")
     else:
         ax.plot(x, result.series("accuracy_seen"), "o-", lw=2.5, label="accuracy (seen classes)")
