@@ -191,4 +191,3 @@ def test_skill_config_respects_selected_optimizer_and_weight_decay():
     assert skill_cfg.optimizer == "lbfgs"
     assert skill_cfg.weight_decay == 0.0
     assert skill_cfg.max_iter == args.skill_max_iter
-
