@@ -160,6 +160,7 @@ def test_print_comparison_handles_missing_class_metrics(capsys):
     assert "n/a" in output
     assert "mean" in output
 
+
 def test_skill_config_respects_selected_optimizer_and_weight_decay():
     from argparse import Namespace
 
