@@ -36,8 +36,9 @@ from ..models import OneVsRestSkillModel
 
 
 def quiet_evaluator() -> EvaluationPlugin:
+    """Return an evaluator with stream accuracy and no loggers."""
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # "No loggers specified" is intended here
+        warnings.simplefilter("ignore")
         return EvaluationPlugin(accuracy_metrics(stream=True), loggers=[])
 
 
@@ -75,7 +76,12 @@ class OneVsRestSkillStrategy(SupervisedTemplate):
         pass
 
     def forward(self):
-        """Scores laid out by class id so Avalanche's argmax-based metrics see class ids."""
+        """Return scores laid out by global class ID.
+
+        The output columns correspond to class IDs, but this mapping does not
+        calibrate or make independently trained skill logits comparable.
+        Do not interpret argmax over these scores as validated multiclass accuracy.
+        """
         return self.model.class_id_scores(self.mb_x, self.num_classes)
 
     def training_epoch(self, **kwargs):
