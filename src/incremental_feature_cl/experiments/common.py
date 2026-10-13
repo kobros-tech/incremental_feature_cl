@@ -294,9 +294,13 @@ def add_common_args(
     p.add_argument(
         "--optimizer",
         choices=["sgd", "adam", "lbfgs"],
-        help="sgd (default) | adam; lbfgs (full-batch, Skills only; the Skills' default)",
+        help="Optimizer: sgd (default), adam, or lbfgs (full-batch; Skills only)",
     )
-    p.add_argument("--weight-decay", type=float, help="L2 (Skills with lbfgs default to 1e-3)")
+    p.add_argument(
+        "--weight-decay",
+        type=float,
+        help="L2 weight decay (default from the experiment configuration)",
+    )
     p.add_argument("--replay-mem-size", type=int)
     p.add_argument("--seed", type=int)
     p.add_argument("--device", help="auto|cpu|cuda")
@@ -405,23 +409,21 @@ def add_skill_args(p: argparse.ArgumentParser) -> None:
 
 
 def skill_config_from(cfg: ExperimentConfig, args: argparse.Namespace) -> SkillConfig:
-    """Map ModelConfig / TrainConfig (the flags shared with train_feature_map) onto a SkillConfig.
+    """Map the effective experiment configuration to a SkillConfig.
 
-    Skills default to the full-batch L-BFGS solver (``--optimizer sgd|adam`` for minibatch).
+    SGD and Adam use epoch-based minibatch training. L-BFGS uses its own
+    full-batch iteration limit.
     """
-    optimizer = cfg.train.optimizer if args.optimizer else "lbfgs"
-    weight_decay = cfg.train.weight_decay
-    if args.weight_decay is None and optimizer == "lbfgs":
-        weight_decay = 1e-3
     pos = args.skill_pos_weight
     pos_weight = None if pos == "none" else "balanced" if pos == "balanced" else float(pos)
+
     return SkillConfig(
         lr=cfg.train.lr,
         momentum=cfg.train.momentum,
-        weight_decay=weight_decay,
+        weight_decay=cfg.train.weight_decay,
         epochs=cfg.train.train_epochs,
         batch_size=cfg.train.train_mb_size,
-        optimizer=optimizer,
+        optimizer=cfg.train.optimizer,
         max_iter=args.skill_max_iter,
         feature_expansion_dim=cfg.model.new_feature_dim,
         activation=cfg.model.activation,
