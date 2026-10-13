@@ -141,7 +141,13 @@ class OneVsRestSkillModel(nn.Module):
     forward = decision_function
 
     def scores_to_predictions(self, scores: torch.Tensor) -> torch.Tensor:
-        """argmax over columns, mapped to *class ids* through the explicit ``class_ids`` order."""
+        """argmax over columns, mapped to *class ids* through the explicit ``class_ids`` order.
+
+        A convenience readout only: the independent skill logits are not comparable and the
+        argmax always answers, so no experiment or report in this package uses it.  Use
+        :func:`evaluation.skill_decisions.decision_report` (which skills fire at their
+        validated thresholds) to evaluate the ensemble.
+        """
         ids = torch.as_tensor(self.class_ids, device=scores.device)
         return ids[scores.argmax(dim=1)]
 
@@ -206,8 +212,10 @@ class OneVsRestSkillModel(nn.Module):
             negs = {k: v for k, v in by_class.items() if k != c}
             per_skill[c] = skill.update(by_class.get(c), negs, step_seed=step, device=device)
             per_skill[c]["is_new_skill"] = c in new_classes
-            # This counts newly known negative classes, not every class whose current
-            # examples were used. ``negatives_used_per_class`` records actual training use.
+            # Newly known negative classes of THIS experience.  ``skill.update`` never writes
+            # memory (step 4 commits the exemplars afterwards), so ``negative_memory`` still holds
+            # the pre-experience state here and the list is not always empty
+            # (tests/test_skill_decisions.py).  ``negatives_used_per_class`` records actual use.
             per_skill[c]["newly_known_negative_classes"] = sorted(
                 k for k in negs if k not in skill.negative_memory
             )

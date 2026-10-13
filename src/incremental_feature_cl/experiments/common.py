@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ from ..models import (
 )
 from ..models.skill import EXPANSIONS
 from ..plotting import make_all_plots
-from ..training import ContinualTrainer, ExpansionPolicy, TrainerConfig
+from ..training import ContinualTrainer, ExpansionPolicy, TrainerConfig, evaluate_state
 from ..utils.reproducibility import collect_environment, resolve_device, seed_everything
 from .config import ExperimentConfig, apply_overrides
 
@@ -196,35 +197,46 @@ def run_experiment(
     out_dir: str | Path | None = None,
     make_plots: bool = True,
     verbose: bool = True,
+    avalanche_baseline: str | None = None,
 ) -> RunResult:
-    """Train IncrementalFeatureMapModel on one target-vs-rest (or class-incremental) stream."""
+    """Train IncrementalFeatureMapModel on one target-vs-rest (or class-incremental) stream.
+
+    ``backend="avalanche"`` (multiclass only) or ``avalanche_baseline`` (e.g. ``"replay"``) runs
+    the same benchmark through Avalanche instead of the built-in trainer.
+    """
+    if avalanche_baseline is not None or cfg.backend == "avalanche":
+        cfg.backend = "avalanche"
     cfg.train.device = str(resolve_device(cfg.train.device))
     cfg.name = cfg.name or cfg.auto_name()
     seed_everything(cfg.seed)
-    train, test, _, shape = get_data(cfg)
+    train, test, num_classes, shape = get_data(cfg)
     out = Path(out_dir) if out_dir else Path(cfg.output_dir) / cfg.name
     if verbose:
         print(
-            f"[{cfg.name}] mode={cfg.mode} backbone={cfg.model.backbone} device={cfg.train.device}",
+            f"[{cfg.name}] mode={cfg.mode} backend={cfg.backend} "
+            f"backbone={cfg.model.backbone} device={cfg.train.device}",
             flush=True,
         )
 
-    stream = build_stream(cfg, train, test)
-    model = build_model(cfg, shape, num_outputs=1)
-    maybe_warm_up(cfg, model.backbone, stream.train[0])
-    policy = ExpansionPolicy(cfg.model.new_feature_dim, cfg.model.initialization)
-    trainer = ContinualTrainer(model, policy, _trainer_cfg(cfg, cfg.train.device))
-    recs = trainer.fit(stream, (lambda r: _print_row(r, cfg.mode)) if verbose else None)
-    result = RunResult(
-        cfg.to_dict(),
-        collect_environment(),
-        cfg.mode,
-        stream.num_classes,
-        stream.class_order,
-        stream.class_first_experience(),
-        recs,
-        target_class=stream.target_class,
-    )
+    if cfg.backend == "avalanche":
+        result = _run_avalanche(cfg, train, test, num_classes, shape, avalanche_baseline, verbose)
+    else:
+        stream = build_stream(cfg, train, test)
+        model = build_model(cfg, shape, num_outputs=1)
+        maybe_warm_up(cfg, model.backbone, stream.train[0])
+        policy = ExpansionPolicy(cfg.model.new_feature_dim, cfg.model.initialization)
+        trainer = ContinualTrainer(model, policy, _trainer_cfg(cfg, cfg.train.device))
+        recs = trainer.fit(stream, (lambda r: _print_row(r, cfg.mode)) if verbose else None)
+        result = RunResult(
+            cfg.to_dict(),
+            collect_environment(),
+            cfg.mode,
+            stream.num_classes,
+            stream.class_order,
+            stream.class_first_experience(),
+            recs,
+            target_class=stream.target_class,
+        )
     result.compute_summary()
     result.save(out)
     if make_plots:
@@ -243,6 +255,113 @@ def run_experiment(
             flush=True,
         )
     return result
+
+
+# ---------------------------------------------------------------------- #
+# Avalanche backend (multiclass only)
+# ---------------------------------------------------------------------- #
+def _run_avalanche(cfg, train, test, num_classes, shape, baseline, verbose) -> RunResult:
+    if cfg.mode != "multiclass":
+        raise NotImplementedError(
+            "the Avalanche backend supports mode='multiclass' only; "
+            "use the torch backend for target-vs-rest"
+        )
+    from torch.utils.data import ConcatDataset
+
+    from ..avalanche import (
+        IncrementalFeatureSpaceStrategy,
+        make_avalanche_baseline,
+        make_split_cifar100,
+        make_tensor_benchmark,
+    )
+
+    d, t, device = cfg.data, cfg.train, cfg.train.device
+    if d.dataset == "cifar100":
+        bm = make_split_cifar100(d.n_experiences, cfg.seed, d.class_order, d.root)
+    else:
+        bm = make_tensor_benchmark(train, test, d.n_experiences, cfg.seed, d.class_order)
+    n_classes = int(bm.n_classes) if hasattr(bm, "n_classes") else num_classes
+    policy = ExpansionPolicy(
+        cfg.model.new_feature_dim if baseline is None else 0, cfg.model.initialization
+    )
+    model = build_model(cfg, shape, num_outputs=n_classes if baseline else 1)
+    if baseline:
+        strategy = make_avalanche_baseline(
+            baseline,
+            model,
+            lr=t.lr,
+            momentum=t.momentum,
+            train_mb_size=t.train_mb_size,
+            train_epochs=t.train_epochs,
+            eval_mb_size=t.eval_mb_size,
+            device=device,
+            mem_size=max(t.replay_mem_size, 200),
+        )
+        plugin_records = None
+    else:
+        opt = torch.optim.SGD(
+            [p for p in model.parameters() if p.requires_grad], lr=t.lr, momentum=t.momentum
+        )
+        strategy = IncrementalFeatureSpaceStrategy(
+            model=model,
+            optimizer=opt,
+            policy=policy,
+            train_mb_size=t.train_mb_size,
+            train_epochs=t.train_epochs,
+            eval_mb_size=t.eval_mb_size,
+            device=device,
+        )
+        plugin_records = strategy.expansion_plugin.records
+    test_all = ConcatDataset([e.dataset for e in bm.test_stream])
+    seen: list[int] = []
+    first: dict[int, int] = {}
+    recs = []
+    for i, exp in enumerate(bm.train_stream):
+        t0 = time.time()
+        classes = [int(c) for c in exp.classes_in_this_experience]
+        strategy.train(exp)
+        dt = time.time() - t0
+        new = [c for c in classes if c not in seen]
+        for c in new:
+            first[c] = i
+        seen += new
+        rec = {
+            "index": i,
+            "classes": classes,
+            "new_classes": new,
+            "train_loss": None,
+            "train_time_s": dt,
+        }
+        exps = [x for x in (plugin_records[-1]["expansions"] if plugin_records else [])]
+        rec["feature_expansion"] = next((x for x in exps if x["kind"] == "feature"), None)
+        rec["output_expansion"] = next((x for x in exps if x["kind"] == "output"), None)
+        rec.update(
+            evaluate_state(
+                model, test_all, n_classes, "multiclass", seen, None, t.eval_mb_size, device
+            )
+        )
+        rec.update(
+            seen_classes=list(seen),
+            feature_dim=model.feature_dim,
+            block_dims=model.block_dims,
+            num_outputs=model.num_outputs,
+            parameter_count=model.parameter_count(),
+            trainable_parameter_count=model.parameter_count(True),
+            classifier_block_norms=model.classifier_block_norms(),
+        )
+        rec["new_block_norm"] = (
+            rec["classifier_block_norms"][-1] if len(model.block_dims) > 1 else 0.0
+        )
+        rec["block_contribution"] = model.block_contribution(test_all[0][0][None].to(device))
+        recs.append(rec)
+        if verbose:
+            _print_row(rec, "multiclass")
+    cfg.name = cfg.name or cfg.auto_name()
+    if baseline and not cfg.name.startswith("avalanche_"):
+        cfg.name = f"avalanche_{baseline}_{cfg.name}"
+    return RunResult(
+        cfg.to_dict(), collect_environment(), "multiclass", n_classes, seen, first, recs
+    )
 
 
 # ---------------------------------------------------------------------- #
@@ -294,12 +413,12 @@ def add_common_args(
     p.add_argument(
         "--optimizer",
         choices=["sgd", "adam", "lbfgs"],
-        help="Optimizer: sgd (default), adam, or lbfgs (full-batch; Skills only)",
+        help="sgd (default) | adam; lbfgs = full-batch, Skills only (the Skills' default)",
     )
     p.add_argument(
         "--weight-decay",
         type=float,
-        help="L2 weight decay (default from the experiment configuration)",
+        help="L2 weight decay (Skills with lbfgs default to 1e-3)",
     )
     p.add_argument("--replay-mem-size", type=int)
     p.add_argument("--seed", type=int)
@@ -411,19 +530,25 @@ def add_skill_args(p: argparse.ArgumentParser) -> None:
 def skill_config_from(cfg: ExperimentConfig, args: argparse.Namespace) -> SkillConfig:
     """Map the effective experiment configuration to a SkillConfig.
 
-    SGD and Adam use epoch-based minibatch training. L-BFGS uses its own
-    full-batch iteration limit.
+    Skills default to the full-batch L-BFGS solver (``--optimizer sgd|adam`` selects minibatch
+    training instead).  SGD and Adam use epoch-based minibatch training (``--train-epochs``,
+    ``--train-mb-size``); L-BFGS ignores those and uses its own full-batch iteration limit
+    (``--skill-max-iter``).  These are different training loops.
     """
+    optimizer = cfg.train.optimizer if args.optimizer else "lbfgs"
+    weight_decay = cfg.train.weight_decay
+    if args.weight_decay is None and optimizer == "lbfgs":
+        weight_decay = 1e-3
     pos = args.skill_pos_weight
     pos_weight = None if pos == "none" else "balanced" if pos == "balanced" else float(pos)
 
     return SkillConfig(
         lr=cfg.train.lr,
         momentum=cfg.train.momentum,
-        weight_decay=cfg.train.weight_decay,
+        weight_decay=weight_decay,
         epochs=cfg.train.train_epochs,
         batch_size=cfg.train.train_mb_size,
-        optimizer=cfg.train.optimizer,
+        optimizer=optimizer,
         max_iter=args.skill_max_iter,
         feature_expansion_dim=cfg.model.new_feature_dim,
         activation=cfg.model.activation,

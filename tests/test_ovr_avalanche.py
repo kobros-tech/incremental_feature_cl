@@ -63,9 +63,15 @@ def test_skill_strategy_updates_skills_through_avalanche(bm):
         assert model.class_ids == expected[i]  # append-only discovery order, stable columns
         assert set(model.skills) == set(expected[i])
         res = s.eval(bm.test_stream[: i + 1])
-        assert any(k.startswith("Top1_Acc_Stream") for k in res)
+        # independent skill logits are not comparable: no argmax-based accuracy by default
+        assert not any(k.startswith("Top1_Acc") for k in res)
     assert len(s.skill_records) == 3
     assert s.skill_records[1]["updated_old_skills"] == [1, 3]  # old skills were updated
     assert model.skills[3].known_negatives == [0, 1, 2, 4, 5]
-    acc = next(v for k, v in res.items() if k.startswith("Top1_Acc_Stream"))
-    assert acc > 1 / N_CLASSES  # Avalanche's argmax-over-class-id metric sees real predictions
+    # the supported evaluation: per-skill binary metrics + which skills fire (no argmax)
+    per_skill, decisions = s.evaluate_skills(bm.test_stream)
+    assert set(per_skill) == set(model.class_ids)
+    assert all(m["auc"] > 0.6 for m in per_skill.values())
+    assert decisions["n_skills"] == N_CLASSES
+    assert 0.0 <= decisions["exact_match_rate"] <= 1.0
+    assert "argmax" not in " ".join(decisions)

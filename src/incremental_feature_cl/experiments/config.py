@@ -64,6 +64,7 @@ class ExperimentConfig:
     # target-vs-rest data ratio (targets per negative; 0.2 = 1 target : 5 negatives).
     # None keeps the whole cumulative negative pool. Controls the data stream, not the loss.
     target_to_negatives: float | None = None
+    backend: str = "torch"  # torch | avalanche (multiclass mode only)
     seed: int = 1
     output_dir: str = "results"
     data: DataConfig = field(default_factory=DataConfig)

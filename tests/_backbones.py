@@ -112,3 +112,8 @@ def build_backbone(name: str, **kwargs) -> nn.Module:
     if key not in _REGISTRY:
         raise ValueError(f"unknown backbone {name!r}; choose from {sorted(_REGISTRY)}")
     return _REGISTRY[key](**kwargs)
+
+
+def mlp_factory(input_size: int, hidden: int = 64, out_dim: int = 32) -> nn.Module:
+    """Factory usable as ``--backbone _backbones.mlp_factory`` (``input_size`` is filled in)."""
+    return MLPBackbone(input_size, (hidden,), out_dim)

@@ -2,6 +2,26 @@
 # SPDX-License-Identifier: MIT
 """Optional Avalanche adapter.  Importing this subpackage requires ``avalanche-lib``."""
 
-from .strategy import OneVsRestSkillStrategy, quiet_evaluator
+from .baselines import AVALANCHE_BASELINES, make_avalanche_baseline
+from .benchmark import make_split_cifar100, make_tensor_benchmark
+from .metrics import FeatureSpaceLogger
+from .strategy import (
+    FeatureExpansionPlugin,
+    IncrementalFeatureSpaceStrategy,
+    OneVsRestSkillStrategy,
+    quiet_evaluator,
+    skill_evaluator,
+)
 
-__all__ = ["OneVsRestSkillStrategy", "quiet_evaluator"]
+__all__ = [
+    "AVALANCHE_BASELINES",
+    "FeatureExpansionPlugin",
+    "FeatureSpaceLogger",
+    "IncrementalFeatureSpaceStrategy",
+    "OneVsRestSkillStrategy",
+    "make_avalanche_baseline",
+    "make_split_cifar100",
+    "make_tensor_benchmark",
+    "quiet_evaluator",
+    "skill_evaluator",
+]

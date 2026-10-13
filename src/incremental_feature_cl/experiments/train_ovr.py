@@ -33,7 +33,12 @@ import numpy as np
 import torch
 
 from ..data import build_class_incremental_stream
-from ..evaluation import macro_metrics, per_skill_metrics
+from ..evaluation import (
+    decision_report,
+    macro_metrics,
+    per_skill_metrics,
+    select_thresholds,
+)
 from ..evaluation.result_store import RunResult
 from ..models import ComparisonConfig, OneVsRestSkillModel
 from ..utils.reproducibility import collect_environment, resolve_device, seed_everything
@@ -50,6 +55,31 @@ from .common import (
     skill_config_from,
 )
 from .common import run_experiment as run_feature_map
+
+
+def split_validation(
+    x: torch.Tensor, y: torch.Tensor, fraction: float, seed: int
+) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+    """Hold out ``fraction`` of every class (at least one sample, never all) for validation.
+
+    Deterministic in ``seed``.  Returns ``((x_train, y_train), (x_val, y_val))``.  Classes with a
+    single sample stay entirely in the training part.
+    """
+    if not 0.0 < fraction < 1.0:
+        raise ValueError(f"validation fraction must be in (0, 1), got {fraction}")
+    rng = np.random.default_rng(seed)
+    y_np = y.cpu().numpy()
+    val_idx: list[int] = []
+    for c in np.unique(y_np):
+        idx = np.flatnonzero(y_np == c)
+        if len(idx) < 2:
+            continue
+        k = min(len(idx) - 1, max(1, round(fraction * len(idx))))
+        val_idx += rng.choice(idx, k, replace=False).tolist()
+    is_val = np.zeros(len(y_np), dtype=bool)
+    is_val[val_idx] = True
+    keep, val = torch.as_tensor(~is_val), torch.as_tensor(is_val)
+    return (x[keep], y[keep]), (x[val], y[val])
 
 
 def refresh_report(info: dict, seen: list[int], new_classes: list[int]) -> dict:
@@ -85,6 +115,7 @@ def run_ovr(
     build_model=None,
     make_plots: bool = True,
     label: str = "ovr",
+    val_fraction: float = 0.0,
 ) -> RunResult:
     cfg.train.device = str(resolve_device(cfg.train.device))
     cfg.model.freeze_backbone = True  # skills replay features: the representation is fixed
@@ -119,9 +150,20 @@ def run_ovr(
     )
 
     records = []
+    val_features: list[torch.Tensor] = []
+    val_labels: list[torch.Tensor] = []
+    last_index = len(stream.train) - 1
     for exp in stream.train:
         started = time.time()
         x, y = materialize(exp.dataset)
+        if val_fraction > 0:
+            # Held out of training; used only to pick decision thresholds.  The frozen
+            # representation makes the features computed now valid for every later experience.
+            (x, y), (x_val, y_val) = split_validation(
+                x, y, val_fraction, cfg.seed * 1009 + exp.index
+            )
+            val_features.append(model.extract(x_val.to(device)).cpu())
+            val_labels.append(y_val)
         info = model.update(x, y, device=device)
         train_time = time.time() - started
 
@@ -130,6 +172,52 @@ def run_ovr(
             scores = model.decision_function_features(h_test.to(device)).cpu().numpy()
         per_skill = per_skill_metrics(scores, labels, model.class_ids, seen)
         macro = macro_metrics(per_skill)
+        # No argmax anywhere: which skills fire (score > threshold) on each test sample.
+        decisions = decision_report(
+            scores, labels, model.class_ids, seen, None, include_matrix=exp.index == last_index
+        )
+        tuned_extra: dict = {}
+        if val_features:
+            with torch.no_grad():
+                val_scores = (
+                    model.decision_function_features(torch.cat(val_features).to(device))
+                    .cpu()
+                    .numpy()
+                )
+            thresholds = select_thresholds(
+                val_scores, torch.cat(val_labels).numpy(), model.class_ids, seen
+            )
+            per_skill_tuned = per_skill_metrics(scores, labels, model.class_ids, seen, thresholds)
+            tuned_extra = {
+                "n_validation": int(sum(len(v) for v in val_labels)),
+                "thresholds": thresholds,
+                "target_metrics_tuned": macro_metrics(per_skill_tuned),
+                "per_skill_target_recall_tuned": [
+                    per_skill_tuned[c]["target_recall"] if c in per_skill_tuned else None
+                    for c in range(num_classes)
+                ],
+                "per_skill_tuned": {
+                    c: {
+                        k: m[k]
+                        for k in (
+                            "threshold",
+                            "target_precision",
+                            "target_recall",
+                            "target_f1",
+                            "false_positive_rate",
+                        )
+                    }
+                    for c, m in per_skill_tuned.items()
+                },
+                "decision_report_tuned": decision_report(
+                    scores,
+                    labels,
+                    model.class_ids,
+                    seen,
+                    thresholds,
+                    include_matrix=exp.index == last_index,
+                ),
+            }
         refresh = refresh_report(info, seen, exp.new_classes)
         losses = [
             v["train_loss"]
@@ -152,8 +240,13 @@ def run_ovr(
                 per_skill[c]["target_recall"] if c in per_skill else None
                 for c in range(num_classes)
             ],
-            "target_metrics": macro,  # mean over skills (headline)
+            "per_skill_auc": [
+                per_skill[c]["auc"] if c in per_skill else None for c in range(num_classes)
+            ],
+            "target_metrics": macro,  # mean over skills, decision ``score > 0`` (headline)
             "per_skill_metrics": per_skill,
+            "decision_report": decisions,
+            **tuned_extra,
             "refresh": refresh,
             "comparison": info.get("comparison"),
             "feature_dim": max(dims.values(), default=model.feature_dim),
@@ -168,7 +261,8 @@ def run_ovr(
         row = (
             f"  exp {exp.index:>2} skills={rec['number_of_skills']:<3} "
             f"bal_acc={macro['balanced_accuracy']:.3f} recall={macro['target_recall']:.3f} "
-            f"neg_acc={macro['negative_accuracy']:.3f} f1={macro['target_f1']:.3f} auc={auc}"
+            f"prec={macro['target_precision']:.3f} neg_acc={macro['negative_accuracy']:.3f} "
+            f"f1={macro['target_f1']:.3f} auc={auc}"
         )
         if refresh["old_skills"]:
             row += (
@@ -183,6 +277,22 @@ def run_ovr(
             else:
                 row += "  WARNING: old skills cannot be refreshed without --memory-per-class > 0"
         print(row, flush=True)
+        print(
+            f"      @threshold 0: exact_match={decisions['exact_match_rate']:.3f} "
+            f"none_fired={decisions['none_fired_rate']:.3f} "
+            f"multi_fired={decisions['multi_fired_rate']:.3f}",
+            flush=True,
+        )
+        if tuned_extra:
+            tm, dt = tuned_extra["target_metrics_tuned"], tuned_extra["decision_report_tuned"]
+            print(
+                f"      @validated thresholds (n_val={tuned_extra['n_validation']}): "
+                f"recall={tm['target_recall']:.3f} prec={tm['target_precision']:.3f} "
+                f"f1={tm['target_f1']:.3f} bal_acc={tm['balanced_accuracy']:.3f} | "
+                f"exact_match={dt['exact_match_rate']:.3f} none_fired={dt['none_fired_rate']:.3f} "
+                f"multi_fired={dt['multi_fired_rate']:.3f}",
+                flush=True,
+            )
 
     result = RunResult(
         {**cfg.to_dict(), "skill_config": vars(skill_cfg)},
@@ -214,6 +324,14 @@ def main(argv=None) -> None:
     )
     p.add_argument("--comparison-epochs", type=int, default=1)
     p.add_argument(
+        "--val-fraction",
+        type=float,
+        default=0.1,
+        help="fraction of every class's training data held out to choose per-skill decision "
+        "thresholds (never the test set; 0 = no validation set, only the threshold-0 decision "
+        "is reported and training uses all data)",
+    )
+    p.add_argument(
         "--vs-feature-map",
         type=int,
         nargs="+",
@@ -224,9 +342,18 @@ def main(argv=None) -> None:
     cfg = config_from_args(a, "target", "cifar100")
     cfg.model.freeze_backbone = True
     skill_cfg = skill_config_from(cfg, a)
+    if not 0.0 <= a.val_fraction < 0.5:
+        p.error("--val-fraction must be in [0, 0.5)")
     comparison = ComparisonConfig(weight=a.comparison_weight, epochs=a.comparison_epochs)
     run_dir = Path(cfg.output_dir) / (cfg.name or f"ovr_{cfg.data.dataset}_s{cfg.seed}")
-    result = run_ovr(cfg, skill_cfg, comparison, run_dir, make_plots=not a.no_plots)
+    result = run_ovr(
+        cfg,
+        skill_cfg,
+        comparison,
+        run_dir,
+        make_plots=not a.no_plots,
+        val_fraction=a.val_fraction,
+    )
     final = result.experiences[-1]["per_skill_metrics"]
     ids = sorted(final)
     rows = {"skill": [final[c] for c in ids]}
@@ -246,6 +373,7 @@ def main(argv=None) -> None:
             ),
             make_plots=False,
             label="sklearn",
+            val_fraction=a.val_fraction,
         )
         per = sk.experiences[-1]["per_skill_metrics"]
         rows["sklearn"] = [per[c_] for c_ in ids]
@@ -277,6 +405,11 @@ def main(argv=None) -> None:
         rows["feature_map"] = [feature_map_by_class.get(class_id) for class_id in ids]
     if len(rows) > 1:
         print_comparison("final experience, target-vs-rest over all seen classes:", rows, ids)
+        if a.vs_feature_map:
+            print(
+                "(feature_map is n/a for classes not listed in --vs-feature-map, and its mean "
+                "covers only the listed classes: that model is trained once per requested class)"
+            )
 
 
 if __name__ == "__main__":

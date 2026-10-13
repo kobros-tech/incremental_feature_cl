@@ -46,6 +46,8 @@ def _flat_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for rec in records:
         row: dict[str, Any] = {}
         for k, v in rec.items():
+            if k == "thresholds":  # one value per skill: results.json / skill_thresholds.csv
+                continue
             if k in dict_keys:
                 for sk, sv in (v or {}).items():
                     if isinstance(sv, scalar):
@@ -89,6 +91,12 @@ class RunResult:
             dtype=float,
         )
 
+    def skill_matrix(self, key: str) -> np.ndarray:
+        """(experience x class) matrix of a per-class list stored in every record (None -> NaN)."""
+        return np.array(
+            [[np.nan if v is None else v for v in e[key]] for e in self.experiences], dtype=float
+        )
+
     def series(self, key: str) -> list:
         return [e.get(key) for e in self.experiences]
 
@@ -119,11 +127,40 @@ class RunResult:
                 self.skill_target_recall_matrix(),
                 first,
             )
+            # Threshold-free (AUC) and validated-threshold views of the same forgetting question:
+            # recall at a fixed ``score > 0`` threshold also moves when only the threshold drifts.
+            for key, label in (
+                ("per_skill_auc", "auc"),
+                ("per_skill_target_recall_tuned", "tuned_recall"),
+            ):
+                if all(key in e for e in self.experiences):
+                    s[f"average_skill_{label}_forgetting"] = average_forgetting(
+                        self.skill_matrix(key), first
+                    )
         elif all("per_class_accuracy" in e for e in self.experiences):
             s["average_forgetting"] = average_forgetting(
                 self.accuracy_matrix(),
                 first,
             )
+
+        tuned = last.get("target_metrics_tuned")
+        if tuned:
+            for k in ("target_precision", "target_recall", "target_f1", "balanced_accuracy"):
+                s[f"final_tuned_{k}"] = tuned.get(k)
+        decisions = last.get("decision_report_tuned")
+        if decisions:
+            for k in (
+                "exact_match_rate",
+                "none_fired_rate",
+                "multi_fired_rate",
+                "precision_when_single",
+                "mean_wrong_skills_fired",
+            ):
+                s[f"final_tuned_{k}"] = decisions.get(k)
+        decisions0 = last.get("decision_report")
+        if decisions0:
+            for k in ("exact_match_rate", "none_fired_rate", "multi_fired_rate"):
+                s[f"final_{k}"] = decisions0.get(k)
 
         final_target = last.get("target_metrics")
         if self.mode == "target" and final_target:
@@ -187,7 +224,52 @@ class RunResult:
                 w.writerow(["experience"] + [f"skill_{c}" for c in range(self.num_classes)])
                 for e in self.experiences:
                     w.writerow([e["index"]] + [_clean(v) for v in e["per_skill_target_recall"]])
+        self._save_skill_tables(out)
         return out / "results.json"
+
+    def _save_skill_tables(self, out: Path) -> None:
+        """Per-skill CSVs of OvR runs (only the ones the records support)."""
+        from .forgetting import running_forgetting
+
+        first = {int(k): int(v) for k, v in self.class_first_experience.items()}
+        header = ["experience"] + [f"skill_{c}" for c in range(self.num_classes)]
+        for key, name in (
+            ("per_skill_auc", "skill_auc"),
+            ("per_skill_target_recall_tuned", "skill_target_recall_tuned"),
+        ):
+            if not all(key in e for e in self.experiences):
+                continue
+            m = self.skill_matrix(key)
+            with open(out / f"{name}.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(header)
+                for e, row in zip(self.experiences, m):
+                    w.writerow([e["index"]] + [_clean(float(v)) for v in row])
+            # running forgetting per skill: best-so-far minus current (0 = not forgotten)
+            r = running_forgetting(m, first)
+            with open(out / f"{name}_forgetting.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(header)
+                for e, row in zip(self.experiences, r):
+                    w.writerow([e["index"]] + [_clean(float(v)) for v in row])
+        if all("thresholds" in e for e in self.experiences):
+            with open(out / "skill_thresholds.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(header)
+                for e in self.experiences:
+                    th = {int(k): v for k, v in e["thresholds"].items()}
+                    w.writerow([e["index"]] + [th.get(c) for c in range(self.num_classes)])
+        for key, name in (
+            ("decision_report", "firing_matrix_threshold0"),
+            ("decision_report_tuned", "firing_matrix_tuned"),
+        ):
+            rep = self.experiences[-1].get(key)
+            if rep and "firing_matrix" in rep:
+                with open(out / f"{name}.csv", "w", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(["true_class"] + [f"skill_{c}" for c in rep["firing_matrix_skills"]])
+                    for c, row in zip(rep["firing_matrix_classes"], rep["firing_matrix"]):
+                        w.writerow([c] + [_clean(v) for v in row])
 
     @classmethod
     def load(cls, path: str | Path) -> RunResult:

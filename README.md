@@ -25,10 +25,16 @@ Skill Memory repositories. Avalanche is an optional integration layer.
 pip install -e .                      # numpy, torch, pyyaml, matplotlib
 pip install -e ".[vision]"            # + torchvision (CIFAR-10/100 download)
 pip install -e ".[avalanche,dev]"     # + avalanche-lib, pytest, ruff
-pytest                                # CPU, no downloads
+pip install -e ".[research]"          # + scikit-learn (--vs-sklearn control, digits datasets)
+pytest                                # CPU, no downloads; Avalanche tests need the avalanche extra
 ```
 
 ## Commands
+
+The package ships no network architectures: the shared representation is any external `nn.Module`
+(`--backbone identity | simplemlp | resnet32 | package.module.Name`, see `models/backbones.py`).
+`identity` feeds the flattened input (raw pixels for images); `simplemlp` / `resnet32` are Avalanche
+models and need `pip install -e ".[avalanche]"`.
 
 ```bash
 # 1a. The Lecture-6 mathematics (no neural net): expansion invariance + kernel identities
@@ -37,42 +43,45 @@ python -m incremental_feature_cl.experiments.math_demo
 # 1b. Smallest neural experiment (synthetic data, CPU, seconds). zero vs random expansion
 python -m incremental_feature_cl.experiments.synthetic_demo            # --mode target for target-vs-rest
 
-# 2. Split CIFAR-100, 5 experiences (first real milestone)
-python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
+# 2. Split CIFAR-100, 5 experiences, one multiclass head (first real milestone)
+python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 --backbone resnet32 \
     --n-experiences 5 --new-feature-dim 16 --train-epochs 5 --seed 1
 
 # 3. Target class 17 vs the rest, 20 experiences
-python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \
+python -m incremental_feature_cl.experiments.train_feature_map --dataset cifar100 --backbone resnet32 \
     --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1
 
-# 3b. Same, with an explicit target:negative ratio (0.2 = 1 target : 5 negatives; omit = cumulative negatives)
-python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \
-    --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 \
-    --target-to-negatives 0.2
+# 3b. Same, with an explicit target:negative ratio (1:5 = 1 target : 5 negatives; omit = cumulative)
+python -m incremental_feature_cl.experiments.train_feature_map --dataset cifar100 --backbone resnet32 \
+    --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --ratio 1:5
 
 # 3c. Sweep the target:negative ratio 5:1 ... 1:5 (+ cumulative reference) for one or more targets
-python -m incremental_feature_cl.experiments.compare_ratios --dataset cifar100 \
+python -m incremental_feature_cl.experiments.compare_ratios --dataset cifar100 --backbone resnet32 \
     --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --yes
 python -m incremental_feature_cl.experiments.compare_ratios --target-class 0 17 50 99 --dry-run
 #     rebuild a finished sweep's tables/plots from its saved runs (no training, no dataset):
 python -m incremental_feature_cl.experiments.compare_ratios --resummarize results/<sweep-dir>
 
 # 4. Full 20-experience class-incremental benchmark (20 x 5 classes)
-python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
+python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 --backbone resnet32 \
     --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1
 #    same benchmark through Avalanche (SplitCIFAR100 + IncrementalFeatureSpaceStrategy):
 #    add --backend avalanche
 
 # 5. Ablation: fixed / fixed+replay / expand-random / expand-zero / expand-zero+replay (+ Avalanche refs)
-python -m incremental_feature_cl.experiments.compare_baselines --dataset cifar100 --n-experiences 5 \
-    --new-feature-dim 16 --replay 200 --avalanche-baselines naive,replay,er_ace,ewc
+python -m incremental_feature_cl.experiments.compare_baselines --dataset cifar100 --backbone resnet32 \
+    --n-experiences 5 --new-feature-dim 16 --replay 200 --avalanche-baselines naive,replay,er_ace,ewc
 
 # 6. Matrix {5,10,20} x {0,4,16,32} x {zero,random}  -- prints the plan; needs --yes to run
 python -m incremental_feature_cl.experiments.run_sweep --preset cifar100-matrix --dry-run
 
 # 7. Several / all target classes (prints an estimate; needs --yes)
-python -m incremental_feature_cl.experiments.train_target --target-class 0 17 50 99 --yes
-python -m incremental_feature_cl.experiments.train_target --target-class all --dry-run
+python -m incremental_feature_cl.experiments.train_feature_map --target-class 0 17 50 99 --yes
+python -m incremental_feature_cl.experiments.train_feature_map --target-class all --dry-run
+
+# 8. One persistent Skill (class 17 vs the rest) and the Skill ensemble (one Skill per class)
+python -m incremental_feature_cl.experiments.train_skill --dataset cifar100 --target-class 17 --ratio 1:5
+python -m incremental_feature_cl.experiments.train_ovr --dataset cifar100 --n-experiences 5 --ratio 1:5
 
 # Regenerate plots from a saved result, no retraining
 python -m incremental_feature_cl.plotting --results results/<run>/results.json
@@ -81,50 +90,112 @@ python -m incremental_feature_cl.plotting --results results/<run>/results.json
 Every script takes `--config configs/*.yaml`, any `--set section.key=value`, `--device auto|cpu|cuda`.
 Run order recommended: synthetic -> CIFAR-10/small subset -> CIFAR-100 x5 -> x20 -> zero vs random -> baselines.
 
-## Continual One-vs-Rest Skill experiment
+## Continual One-vs-Rest Skill experiment (`train_ovr`)
 
-Evaluate the persistent Skill ensemble on the same class-incremental stream used by the other
-experiments. After every experience, the run records accuracy for each learned class; the saved
-accuracy matrix is also used to calculate standard average forgetting. This evaluates the Skill
-protocol, not a head-to-head comparison with a different training protocol.
+`OneVsRestSkillModel` keeps one persistent `Skill` per class (class `c` versus everything else it has
+seen) on top of a **frozen** shared representation, and refreshes *every* skill whenever new classes
+arrive: new classes become negatives of all old skills, old classes (replayed exemplars) become
+negatives of the new skills.
 
 ```bash
 # quick structural run (no downloads)
-python -m incremental_feature_cl.experiments.compare_ovr --dataset synthetic --backbone identity \
-    --n-experiences 3 --train-epochs 2 --seed 1 --ratio 1:5 --memory-per-class 20
+python -m incremental_feature_cl.experiments.train_ovr --dataset synthetic --backbone identity \
+    --n-experiences 5 --ratio 1:5 --seed 1 --no-plots
 
-# CIFAR-100 experiment
-python -m incremental_feature_cl.experiments.compare_ovr --dataset cifar100 --n-experiences 20 \
-    --new-feature-dim 16 --train-epochs 5 --seed 1 --ratio 1:5 --memory-per-class 20
+# baseline: raw pixels (identity) on CIFAR-100, with the feature-map comparison for class 0
+python -m incremental_feature_cl.experiments.train_ovr --dataset cifar100 --backbone identity \
+    --n-experiences 5 --ratio 1:5 --memory-per-class 100 --skill-max-iter 100 --seed 1 \
+    --no-plots --vs-feature-map 0
 
-# standalone sklearn control (a separate protocol)
-python -m incremental_feature_cl.experiments.compare_sklearn_ovr --dataset synthetic --backbone identity \
-    --n-experiences 5 --train-epochs 5 --lr 0.05
+# diagnostic: a learned representation (trained on experience 0, then frozen); needs avalanche-lib
+python -m incremental_feature_cl.experiments.train_ovr --dataset cifar100 --backbone simplemlp \
+    --backbone-kwargs '{"hidden_size": 256}' --warmup-epochs 5 --freeze-backbone \
+    --n-experiences 5 --ratio 1:5 --memory-per-class 100 --skill-max-iter 100 --seed 1 \
+    --no-plots --vs-feature-map 0
+
+# scikit-learn control with the same data protocol (needs the research extra)
+python -m incremental_feature_cl.experiments.train_ovr --dataset synthetic --backbone identity \
+    --n-experiences 5 --ratio 1:5 --vs-sklearn
 ```
 
-Outputs: `results.json`, `metrics.csv`, `per_class_accuracy.csv`, and plots unless `--no-plots`
-is set. The console and result summary report final/average accuracy on seen classes and
-`average_forgetting`. The per-class accuracy matrix uses null/NaN for classes not yet introduced;
-the CSV lets you trace when each class improves or is forgotten.
+### What is measured, and what deliberately is not
 
-Design responsibilities:
+Skill scores are raw logits of independently trained binary classifiers; they were never trained to be
+comparable with each other. **No `argmax` is used anywhere in the reports**: an `argmax` always
+answers, even when no skill recognises the sample, and it silently assumes comparability. The
+experiment instead asks which skills *fire* (`score > threshold`):
 
-* `IncrementalFeatureMapModel` is the expandable feature-map model used by the existing single
-  target and multiclass experiments. It does not itself implement class-specific replay policy.
-* `Skill` is one persistent binary learner: one class versus the negatives it has observed. It
-  owns positive and per-negative-class replay memory, target:negative sampling, BCE training,
-  and one-time feature expansion.
-* `OneVsRestSkillModel` is the multiclass coordinator. It creates exactly one `Skill` per class,
-  updates old skills when new classes arrive, holds the shared frozen representation, and maps
-  score columns back to global class IDs. It is needed for class-incremental prediction; a single
-  `Skill` alone can answer only one binary target-vs-rest question.
+| Report | Meaning |
+| --- | --- |
+| per-skill binary metrics (`target_metrics`, `per_skill_metrics`) | recall, precision, F1, negative accuracy, balanced accuracy, AUC of every skill as a target-vs-rest classifier on the seen classes, decision `score > 0`. Headline numbers are means over skills. |
+| `decision_report` (threshold 0) | over all test samples of seen classes: `none_fired_rate` (no skill recognises it), `multi_fired_rate` (several do), `exact_match_rate` (only the true skill fires; abstentions and ambiguous samples count as errors), `precision_when_single`, per-class recall / precision / false-positive rate, and the firing matrix `[true class, skill]`. |
+| `target_metrics_tuned`, `decision_report_tuned` | the same with one **validated threshold per skill** (F1-maximising on held-out validation data). |
+
+**Why thresholds matter.** With `K` seen classes only about `1/K` of the evaluated samples are positives
+for a given skill, so a skill trained at a 1:5 target:negative ratio and judged at `score > 0` can show
+a decent recall and a poor precision / F1 even when its ranking (AUC) is good. The validated threshold
+separates *a threshold problem* from *a representation problem* (low AUC) and from *forgetting*.
+
+**Validation protocol.** `--val-fraction` (default `0.1`; `0` disables it and reproduces the previous
+training data exactly) holds out that fraction of every class's training data in every experience. The
+held-out samples are **never used for training and never come from the test set**; they are only used to
+choose the thresholds. The validation features of earlier classes are kept for later experiences (the
+representation is frozen), which is evaluation-time calibration with access to old-class validation
+data, not something a strict continual learner would have. Thresholds never feed back into training. With
+very small validation sets (a handful of samples per class, as on the tiny synthetic data) the selected
+thresholds are noisy and can be *worse* than `0`; the saved `n_validation` states how many samples were
+used.
+
+**Forgetting per skill.** `average_skill_forgetting` is the standard peak-to-final forgetting of each
+skill's target recall at threshold 0. Because that number also moves when only a threshold drifts, the run
+also reports it for the threshold-free AUC (`average_skill_auc_forgetting`) and for recall at the validated
+thresholds (`average_skill_tuned_recall_forgetting`). `skill_*_forgetting.csv` holds the running forgetting
+(best so far minus current) of every skill after every experience.
+
+**`--train-epochs` vs `--skill-max-iter`.** Skills use full-batch L-BFGS by default; `--skill-max-iter` is
+its iteration limit and `--train-epochs`, `--train-mb-size`, `--lr` are then unused. `--optimizer sgd|adam`
+switches the skills to epoch-based minibatch training. The Avalanche strategy always runs one epoch because
+the skills own their training loops.
+
+**`--vs-feature-map K ...`** trains `IncrementalFeatureMapModel` once per listed class; every other class
+shows `n/a` and the feature-map `mean` covers only the listed classes. One class is not evidence of a general
+advantage; list several.
+
+Outputs: `results.json`, `metrics.csv`, `skill_target_recall.csv`, `skill_auc.csv`,
+`skill_target_recall_tuned.csv`, `skill_auc_forgetting.csv`, `skill_target_recall_tuned_forgetting.csv`,
+`skill_thresholds.csv`, `firing_matrix_threshold0.csv`, `firing_matrix_tuned.csv` (final experience), and
+plots unless `--no-plots`.
+
+### Avalanche
+
+```python
+strategy = OneVsRestSkillStrategy(model=model, num_classes=100)
+for experience in benchmark.train_stream:
+    strategy.train(experience)
+per_skill, decisions = strategy.evaluate_skills(benchmark.test_stream)  # no argmax
+```
+
+The strategy's default evaluator contains no Avalanche accuracy metric because that metric is an `argmax`
+over the skill columns. `strategy.forward` lays the scores out by class id only to map columns to classes;
+that does not make the logits comparable.
+
+### Design responsibilities
+
+* `IncrementalFeatureMapModel` is the expandable feature-map model used by the single-target and
+  multiclass experiments. It does not itself implement class-specific replay policy.
+* `Skill` is one persistent binary learner: one class versus the negatives it has observed. It owns positive
+  and per-negative-class replay memory, target:negative sampling, BCE training, and one-time feature
+  expansion.
+* `OneVsRestSkillModel` creates exactly one `Skill` per class, updates old skills when new classes arrive,
+  holds the shared frozen representation, and maps score columns back to global class IDs. The optional
+  `ComparisonConfig` (`--comparison-weight`, default off) trains the skills jointly so that their scores
+  become more comparable; whether it helps must be measured with the reports above, not assumed.
 
 The shared backbone is frozen because replay stores feature vectors, not images. This differs from
-`train_target`'s default trainable-backbone setup, so do not interpret the two results as an
-apples-to-apples model comparison. Scores are independent raw logits; per-class accuracy and
-forgetting are the primary metrics, not cross-skill threshold decisions or uncalibrated score
-magnitudes. The experiment intentionally avoids sample-by-sample score dumps and the previous
-multi-backend/multi-model comparison orchestration.
+`train_feature_map`'s default trainable-backbone setup, so the two results are not an apples-to-apples
+comparison. The `identity` backbone gives the skills raw pixels; high results on the synthetic data show that
+the continual protocol works under favourable conditions, not that a useful CIFAR-100 representation is
+learned.
 
 ## Mathematical Motivation
 
@@ -181,7 +252,7 @@ deliberately not implemented. Raw-pixel polynomial expansion on CIFAR (3072 dims
 | `math/` | Reference maths: `PolynomialFeatureMap`, kernels, `Perceptron` (expandable), `KernelPerceptron`. |
 | `models/feature_map.py` | `FeatureBlock`: `psi(h) = act(Linear(h))` on the backbone vector `h` (own params random). |
 | `models/classifier.py` | `ExpandableLinearClassifier`: `logits = b + sum_k W_k phi_k`. `add_block` (feature axis) and `expand_outputs` (class axis) are independent. |
-| `models/backbones.py` | `slimresnet18`, `smallconv`, `mlp`, `identity`; only `out_dim` matters to the expansion mechanism. |
+| `models/backbones.py` | `identity` plus `FeatureBackbone`, an adapter for any external `nn.Module` (Avalanche `SimpleMLP` / `resnet32`, torchvision, ...); only `out_dim` matters to the expansion mechanism. |
 | `models/incremental_model.py` | `IncrementalFeatureMapModel`: `expand_feature_space(new_dim, initialization)`, `expand_outputs(n)`, `ensure_outputs(n)`, diagnostics (`classifier_block_norms`, `block_contribution`), optional `freeze_backbone` / `freeze_old_blocks`. |
 | `models/skill.py` | `Skill`: one binary target-vs-rest learner with per-class replay memory and incremental feature expansion. |
 | `models/ovr.py` | `OneVsRestSkillModel`: class-to-Skill coordinator, frozen shared backbone, global class-ID score mapping. |
@@ -189,9 +260,9 @@ deliberately not implemented. Raw-pixel polynomial expansion on CIFAR (3072 dims
 | `training/trainer.py` | `ContinualTrainer`: probe before expansion -> expand -> probe -> grow outputs -> train -> probe -> evaluate. |
 | `training/replay.py` | Minimal class-balanced buffer for *controlled ablations only* (not a replacement for Avalanche's methods). |
 | `data/` | Committed synthetic/CIFAR loaders, `ArrayDataset`, and deterministic class-incremental/target-vs-rest streams. |
-| `evaluation/` | Per-class accuracy, forgetting, target metrics, `RunResult` (json/csv). |
+| `evaluation/` | Per-class accuracy, forgetting, target metrics, per-skill metrics, validated thresholds and the argmax-free `decision_report`, `RunResult` (json/csv). |
 | `plotting/` | Plots A-H, regenerated from `results.json`. |
-| `avalanche/` | `FeatureExpansionPlugin`, `IncrementalFeatureSpaceStrategy`, benchmark builders, Avalanche baselines. |
+| `avalanche/` | `FeatureExpansionPlugin`, `IncrementalFeatureSpaceStrategy`, `OneVsRestSkillStrategy`, benchmark builders, Avalanche baselines. |
 | `experiments/` | CLIs listed above + `config.py`, `common.py`. |
 
 Design choices worth knowing: `psi_t` takes the backbone vector `h` (not the whole `Phi_{t-1}`); one shared
@@ -202,14 +273,14 @@ are explicit stability/plasticity controls and default to `false`.
 
 ## Two experiments, deliberately separate
 
-* **Mode A - target-vs-rest** (`train_target.py`): one binary logit answers "is this class K?". Experience `t`
+* **Mode A - target-vs-rest** (`train_feature_map.py`): one binary logit answers "is this class K?". Experience `t`
   trains on all target samples + the **cumulative** pool of every negative class introduced so far
   (`0..t`; target data re-appears each experience, `--no-target-in-every-experience` changes that), so the
   classifier keeps seeing a growing negative space and the negative/positive ratio grows with `t`. Evaluation
   uses the same negative set. Loss: BCE with `pos_weight = n_neg / n_pos` of the experience
   (`train.pos_weight`; set `null` to disable). The data ratio can be controlled explicitly, see below.
 * **Mode B - multiclass class-incremental** (`train_cifar100.py`): standard CIL, softmax head grown as classes
-  appear. A binary target classifier is **not** a 100-class classifier; the optional Skill ensemble is a separate experiment (`compare_ovr.py`).
+  appear. A binary target classifier is **not** a 100-class classifier; the Skill ensemble is a separate experiment (`train_ovr.py`).
 
 ### Target-vs-rest negative ratio (`target_to_negatives`)
 
@@ -247,8 +318,8 @@ raise `ValueError`; the flag is rejected outside target mode. Experiment names g
 `..._r0.2_s1`) when a ratio is set; `None` keeps the previous names. The value is stored in `results.json`.
 
 ```bash
-python -m incremental_feature_cl.experiments.train_target --dataset cifar100 --target-class 17 \
-    --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --target-to-negatives 0.2
+python -m incremental_feature_cl.experiments.train_feature_map --dataset cifar100 --target-class 17 \
+    --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --ratio 1:5
 # sweep the ratio (null = original cumulative behaviour); prints the plan, needs --yes to run
 python -m incremental_feature_cl.experiments.run_sweep --mode target --target-class 17 --dataset cifar100 \
     --grid target_to_negatives=null,0.1,0.2,0.5,1 --dry-run
@@ -320,13 +391,12 @@ nothing about the negative classes; `average_forgetting` is the mean forgetting 
 called `target_recall_drop` before). `average_*` metrics average over experiences and therefore mix experiences
 that reached the requested ratio with ones that did not; use `final_*` (or check
 `fraction_experiences_at_requested_ratio`) when comparing ratios.
-The synthetic dataset is a plumbing check only (and the `smallconv` backbone cannot learn it because of global
-pooling; use `--backbone mlp` there); conclusions about ratios need CIFAR-100 runs.
+The synthetic dataset is a plumbing check only (use `--backbone identity` there); conclusions about ratios need CIFAR-100 runs.
 
 ## Avalanche integration
 
 ```python
-model = IncrementalFeatureMapModel(build_backbone("slimresnet18"), num_outputs=1)
+model = IncrementalFeatureMapModel(build_backbone("resnet32", (3, 32, 32)), num_outputs=1)
 strategy = IncrementalFeatureSpaceStrategy(
     model=model, optimizer=opt, policy=ExpansionPolicy(16, "zero")
 )
@@ -386,7 +456,7 @@ maths (kernel identity, kernel == feature-space perceptron) - reproducibility, r
   choice explicit.
 * The Avalanche backend supports multiclass mode only and lacks the pre/post-expansion probes; iCaRL is not
   wired (needs a feature-extractor/classifier split). The Skill OvR experiment uses a frozen backbone and raw
-  independent logits; no adaptive `new_dim`, no kernel expansion, no data augmentation in the built-in loaders.
+  independent logits, evaluated by per-skill binary metrics and which-skills-fire reports (no `argmax`); no adaptive `new_dim`, no kernel expansion, no data augmentation in the built-in loaders.
 * The probe subset is drawn from the test set (inputs only) purely for diagnostics; it never influences training.
 * Replay in `training/replay.py` is intentionally simplistic; use Avalanche for real baselines.
 * Target-vs-rest streams hold every experience's training data in memory. The cumulative (`None`) stream for

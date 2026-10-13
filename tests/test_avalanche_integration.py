@@ -97,7 +97,7 @@ def test_strategy_trains_across_experiences_and_accumulates_skills(
     assert len(strategy.skill_records) == 3
 
 
-def test_strategy_evaluates_with_class_id_scores(benchmark):
+def test_strategy_default_evaluator_has_no_argmax_accuracy(benchmark):
     model = _make_model()
 
     strategy = OneVsRestSkillStrategy(
@@ -110,7 +110,11 @@ def test_strategy_evaluates_with_class_id_scores(benchmark):
 
     results = strategy.eval(benchmark.test_stream[:1])
 
-    assert any(key.startswith("Top1_Acc_Stream") for key in results)
+    # Avalanche's accuracy is an argmax over independent skill logits: not reported by default
+    assert not any(key.startswith("Top1_Acc") for key in results)
+    per_skill, decisions = strategy.evaluate_skills(benchmark.test_stream[:1])
+    assert set(per_skill) == set(model.class_ids)
+    assert decisions["n_samples"] > 0
 
 
 def test_model_predictions_are_consistent_with_class_id_mapping(

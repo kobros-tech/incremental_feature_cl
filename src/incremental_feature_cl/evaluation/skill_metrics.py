@@ -12,7 +12,7 @@ multiclass accuracy derived from the argmax of skill scores.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 
@@ -32,12 +32,20 @@ _AVERAGED = (
 
 
 def per_skill_metrics(
-    scores: np.ndarray, labels: np.ndarray, class_ids: Sequence[int], seen: Sequence[int]
+    scores: np.ndarray,
+    labels: np.ndarray,
+    class_ids: Sequence[int],
+    seen: Sequence[int],
+    thresholds: Mapping[int, float] | None = None,
 ) -> dict[int, dict]:
     """``{class id: binary_target_metrics}`` for every skill whose class has been seen.
 
-    ``scores[:, j]`` is the logit of the skill of ``class_ids[j]``.
+    ``scores[:, j]`` is the logit of the skill of ``class_ids[j]``.  The decision is
+    ``score > thresholds[class id]`` (``0`` when ``thresholds`` is ``None`` or lacks the class),
+    so the default reproduces the plain ``score > 0`` evaluation.  Threshold-free ``auc`` does not
+    depend on it.  Each result also records the ``threshold`` that was used.
     """
+    thresholds = thresholds or {}
     seen_set = {int(c) for c in seen}
     out: dict[int, dict] = {}
     for j, c in enumerate(class_ids):
@@ -45,7 +53,10 @@ def per_skill_metrics(
         if c not in seen_set:
             continue
         negatives = seen_set - {c}
-        out[c] = binary_target_metrics(scores[:, j] > 0, labels, c, negatives, scores[:, j])
+        t = float(thresholds.get(c, 0.0))
+        m = binary_target_metrics(scores[:, j] > t, labels, c, negatives, scores[:, j])
+        m["threshold"] = t
+        out[c] = m
     return out
 
 
