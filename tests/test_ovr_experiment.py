@@ -39,7 +39,7 @@ def out(tmp_path):
     return tmp_path / "t"
 
 
-def test_skill_run_saves_accuracy_and_forgetting(out):
+def test_ovr_run_saves_skill_forgetting_without_multiclass_accuracy(out):
     result = RunResult.load(out / "results.json")
 
     assert len(result.experiences) == 3
@@ -48,28 +48,27 @@ def test_skill_run_saves_accuracy_and_forgetting(out):
     assert set(result.experiences[1]["updated_old_skills"]) == set(result.experiences[0]["classes"])
     assert result.experiences[-1]["feature_dim"] > 0
 
-    assert {
-        "final_accuracy_seen",
-        "average_accuracy_seen",
-        "average_forgetting",
-    } <= set(result.summary)
+    assert "average_skill_forgetting" in result.summary
+    assert "average_forgetting" not in result.summary
+    assert "final_accuracy_seen" not in result.summary
+    assert "average_accuracy_seen" not in result.summary
 
-    assert len(result.accuracy_matrix()) == 3
+    assert len(result.skill_target_recall_matrix()) == 3
 
     for experience in result.experiences:
         seen = set(experience["seen_classes"])
-        for class_id, accuracy in enumerate(experience["per_class_accuracy"]):
-            assert (accuracy is None) == (class_id not in seen)
+        for class_id, recall in enumerate(experience["per_skill_target_recall"]):
+            assert (recall is None) == (class_id not in seen)
 
     assert result.experiences[-1]["trainable_parameter_count"] > 0
 
 
 def test_per_class_accuracy_csv_and_skill_config_are_saved(out):
-    with (out / "per_class_accuracy.csv").open(newline="", encoding="utf-8") as file:
+    with (out / "skill_target_recall.csv").open(newline="", encoding="utf-8") as file:
         rows = list(csv.DictReader(file))
 
     assert len(rows) == 3
-    assert "class_11" in rows[0]
+    assert "skill_11" in rows[0]
 
     data = json.loads((out / "results.json").read_text(encoding="utf-8"))
 
@@ -94,7 +93,7 @@ def test_run_does_not_print_sample_by_sample_score_dump(tmp_path, capsys):
     output = capsys.readouterr().out
 
     assert "Sample 0" not in output
-    assert "avg_forgetting=" in output
+    assert "avg_skill_forgetting=" in output
 
 
 def test_sklearn_control(tmp_path):
@@ -117,3 +116,46 @@ def test_sklearn_control(tmp_path):
 
     assert len(result.experiences) == 3
     assert [row["number_of_skills"] for row in result.experiences] == [4, 8, 12]
+
+
+def test_print_comparison_handles_missing_class_metrics(capsys):
+    rows = {
+        "skill": [
+            {
+                "balanced_accuracy": 0.8,
+                "target_recall": 0.7,
+                "negative_accuracy": 0.9,
+                "target_f1": 0.6,
+                "auc": 0.85,
+            },
+            {
+                "balanced_accuracy": 0.7,
+                "target_recall": 0.6,
+                "negative_accuracy": 0.8,
+                "target_f1": 0.5,
+                "auc": 0.75,
+            },
+        ],
+        "feature_map": [
+            {
+                "balanced_accuracy": 0.9,
+                "target_recall": 0.8,
+                "negative_accuracy": 1.0,
+                "target_f1": 0.7,
+                "auc": 0.95,
+            },
+            None,
+        ],
+    }
+
+    train_ovr.print_comparison(
+        "test comparison",
+        rows,
+        [0, 1],
+    )
+
+    output = capsys.readouterr().out
+
+    assert "test comparison" in output
+    assert "n/a" in output
+    assert "mean" in output

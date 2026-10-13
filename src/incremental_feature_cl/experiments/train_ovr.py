@@ -15,10 +15,7 @@ The log line proves it: ``refreshed 80/80 old skills (negatives: new classes 100
 Each skill is scored like a ``train_feature_map`` run with that class as target (its own decision
 ``logit > 0`` on its class vs. the other seen classes): the headline numbers are means over skills
 of ``recall``, ``neg_acc``, ``bal_acc`` = (recall + neg_acc) / 2, ``f1`` and ``auc``.
-``argmax_acc`` (multiclass accuracy of the arg-max over skill logits) is only a diagnostic:
-independent skills are not trained to be compared.  ``--comparison-weight W`` (> 0) adds a joint
-comparison phase that trains all skills together on the replay exemplars so that arg-max becomes
-meaningful.
+Independent skill scores are not treated as multiclass predictions.
 
 ``--vs-feature-map K ...`` runs IncrementalFeatureMapModel for those classes and ``--vs-sklearn``
 the scikit-learn control (same data protocol) and prints everything side by side.
@@ -36,7 +33,7 @@ import numpy as np
 import torch
 
 from ..data import build_class_incremental_stream
-from ..evaluation import argmax_accuracy, macro_metrics, per_skill_metrics
+from ..evaluation import macro_metrics, per_skill_metrics
 from ..evaluation.result_store import RunResult
 from ..models import ComparisonConfig, OneVsRestSkillModel
 from ..utils.reproducibility import collect_environment, resolve_device, seed_everything
@@ -133,8 +130,6 @@ def run_ovr(
             scores = model.decision_function_features(h_test.to(device)).cpu().numpy()
         per_skill = per_skill_metrics(scores, labels, model.class_ids, seen)
         macro = macro_metrics(per_skill)
-        argmax_seen = argmax_accuracy(scores, labels, model.class_ids, seen)
-        predicted = np.asarray(model.class_ids)[scores.argmax(axis=1)]
         refresh = refresh_report(info, seen, exp.new_classes)
         losses = [
             v["train_loss"]
@@ -151,15 +146,14 @@ def run_ovr(
             "seen_classes": seen,
             "train_loss": float(np.mean(losses)) if losses else None,
             "train_time_s": train_time,
-            # per_class_accuracy[c] = balanced accuracy of the skill of class c (None if unseen)
-            "per_class_accuracy": [
-                per_skill[c]["balanced_accuracy"] if c in per_skill else None
+            # Per-skill target recall: measures whether each skill recognizes
+            # its own class, independently of comparisons between skill logits.
+            "per_skill_target_recall": [
+                per_skill[c]["target_recall"] if c in per_skill else None
                 for c in range(num_classes)
             ],
             "target_metrics": macro,  # mean over skills (headline)
             "per_skill_metrics": per_skill,
-            "accuracy_seen": argmax_seen,  # arg-max over skill logits: diagnostic only
-            "accuracy_all": float((predicted == labels).mean()),
             "refresh": refresh,
             "comparison": info.get("comparison"),
             "feature_dim": max(dims.values(), default=model.feature_dim),
@@ -174,8 +168,7 @@ def run_ovr(
         row = (
             f"  exp {exp.index:>2} skills={rec['number_of_skills']:<3} "
             f"bal_acc={macro['balanced_accuracy']:.3f} recall={macro['target_recall']:.3f} "
-            f"neg_acc={macro['negative_accuracy']:.3f} f1={macro['target_f1']:.3f} auc={auc} "
-            f"| argmax_acc={argmax_seen:.3f}"
+            f"neg_acc={macro['negative_accuracy']:.3f} f1={macro['target_f1']:.3f} auc={auc}"
         )
         if refresh["old_skills"]:
             row += (
@@ -235,7 +228,7 @@ def main(argv=None) -> None:
     run_dir = Path(cfg.output_dir) / (cfg.name or f"ovr_{cfg.data.dataset}_s{cfg.seed}")
     result = run_ovr(cfg, skill_cfg, comparison, run_dir, make_plots=not a.no_plots)
     final = result.experiences[-1]["per_skill_metrics"]
-    ids = sorted(a.vs_feature_map) if a.vs_feature_map else sorted(final)
+    ids = sorted(final)
     rows = {"skill": [final[c] for c in ids]}
 
     if a.vs_sklearn:
@@ -257,19 +250,31 @@ def main(argv=None) -> None:
         per = sk.experiences[-1]["per_skill_metrics"]
         rows["sklearn"] = [per[c_] for c_ in ids]
     if a.vs_feature_map:
-        fm = []
-        for k in ids:
+        requested = set(a.vs_feature_map)
+        unknown = requested - set(ids)
+        if unknown:
+            raise ValueError(f"--vs-feature-map contains unknown class IDs: {sorted(unknown)}")
+
+        feature_map_by_class = {}
+
+        for class_id in sorted(requested):
             c = copy.deepcopy(cfg)
-            c.mode, c.target_class, c.name = "target", k, ""
+            c.mode = "target"
+            c.target_class = class_id
             c.name = c.auto_name()
+
             r = run_feature_map(
                 c,
-                out_dir=run_dir / "vs_feature_map" / f"target_{k}",
+                out_dir=run_dir / "vs_feature_map" / f"target_{class_id}",
                 make_plots=False,
                 verbose=False,
             )
-            fm.append(r.experiences[-1]["target_metrics"])
-        rows["feature_map"] = fm
+
+            feature_map_by_class[class_id] = r.experiences[-1]["target_metrics"]
+
+        # Keep the same row order as the Skill results.
+        # Classes not requested are intentionally shown as n/a.
+        rows["feature_map"] = [feature_map_by_class.get(class_id) for class_id in ids]
     if len(rows) > 1:
         print_comparison("final experience, target-vs-rest over all seen classes:", rows, ids)
 

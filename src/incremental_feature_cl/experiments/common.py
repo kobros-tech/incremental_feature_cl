@@ -438,31 +438,40 @@ def skill_config_from(cfg: ExperimentConfig, args: argparse.Namespace) -> SkillC
 _COLUMNS = ("balanced_accuracy", "target_recall", "negative_accuracy", "target_f1", "auc")
 
 
-def print_comparison(title: str, rows_by_name: dict[str, list[dict]], ids) -> None:
-    """Side-by-side table of per-class target-vs-rest metrics (one column group per learner)."""
+def print_comparison(title: str, rows_by_name: dict[str, list[dict | None]], ids) -> None:
+    """Side-by-side table of per-class target-vs-rest metrics."""
 
-    def cell(m: dict, k: str) -> str:
-        return f"{m[k]:7.3f}" if m.get(k) is not None else "    n/a"
+    def cell(m: dict | None, k: str) -> str:
+        if m is None or m.get(k) is None:
+            return "    n/a"
+        return f"{m[k]:7.3f}"
 
-    def mean(rows: list[dict], k: str) -> dict:
-        vals = [r[k] for r in rows if r.get(k) is not None]
+    def mean(rows: list[dict | None], k: str) -> dict:
+        vals = [row[k] for row in rows if row is not None and row.get(k) is not None]
         return {k: float(np.mean(vals)) if vals else None}
 
     names = list(rows_by_name)
     head = " ".join(f"{h:>7}" for h in ("bal", "recall", "neg", "f1", "auc"))
+
     print(f"\n{title}")
     print(f"{'class':>6} | " + " | ".join(f"{n:^39}" for n in names))
     print(f"{'':>6} | " + " | ".join(head for _ in names))
-    for i, c in enumerate(ids):
+
+    for i, class_id in enumerate(ids):
         print(
-            f"{c:>6} | "
-            + " | ".join(" ".join(cell(rows_by_name[n][i], k) for k in _COLUMNS) for n in names)
+            f"{class_id:>6} | "
+            + " | ".join(
+                " ".join(cell(rows_by_name[name][i], metric) for metric in _COLUMNS)
+                for name in names
+            )
         )
+
     if len(ids) > 1:
         print(
             f"{'mean':>6} | "
             + " | ".join(
-                " ".join(cell(mean(rows_by_name[n], k), k) for k in _COLUMNS) for n in names
+                " ".join(cell(mean(rows_by_name[name], metric), metric) for metric in _COLUMNS)
+                for name in names
             )
         )
 
@@ -490,9 +499,28 @@ def finish_skill_run(result: RunResult, out_dir: Path, make_plots: bool) -> None
         plot_feature_growth(result, plots / "F_feature_growth.png")
     s = result.summary
     auc = f" final_auc={s['final_auc']:.3f}" if s.get("final_auc") is not None else ""
+
+    if "average_skill_forgetting" in s:
+        forgetting = s["average_skill_forgetting"]
+        forgetting_label = "avg_skill_forgetting"
+        metric_description = "skill target recall"
+    else:
+        # Preserve compatibility with existing skill-style runs that still
+        # report class-wise accuracy forgetting.
+        forgetting = s.get("average_forgetting")
+        forgetting_label = "avg_forgetting"
+        metric_description = "balanced accuracy per class"
+
+    forgetting_text = (
+        f"{forgetting_label}={forgetting:.3f}"
+        if forgetting is not None
+        else f"{forgetting_label}=n/a"
+    )
+
     print(
-        f"[{result.config.get('name', '')}] final_bal_acc={s['final_balanced_accuracy']:.3f}{auc} "
-        f"final_f1={s['final_target_f1']:.3f} avg_forgetting={s['average_forgetting']:.3f} "
-        f"(balanced accuracy per class) -> {out_dir}",
+        f"[{result.config.get('name', '')}] "
+        f"final_bal_acc={s['final_balanced_accuracy']:.3f}{auc} "
+        f"final_f1={s['final_target_f1']:.3f} "
+        f"{forgetting_text} ({metric_description}) -> {out_dir}",
         flush=True,
     )

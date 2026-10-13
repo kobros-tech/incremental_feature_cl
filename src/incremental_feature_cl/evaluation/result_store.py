@@ -79,24 +79,52 @@ class RunResult:
             dtype=float,
         )
 
+    def skill_target_recall_matrix(self) -> np.ndarray:
+        """Return the (experience x class) target-recall matrix."""
+        return np.array(
+            [
+                [np.nan if v is None else v for v in e["per_skill_target_recall"]]
+                for e in self.experiences
+            ],
+            dtype=float,
+        )
+
     def series(self, key: str) -> list:
         return [e.get(key) for e in self.experiences]
 
     def compute_summary(self) -> dict[str, Any]:
-        acc = self.accuracy_matrix()
-        first = {int(k): int(v) for k, v in self.class_first_experience.items()}
         last = self.experiences[-1]
         s: dict[str, Any] = {
-            "final_accuracy_seen": last.get("accuracy_seen"),
-            "final_accuracy_all": last.get("accuracy_all"),
-            "average_accuracy_seen": float(
-                np.nanmean([e["accuracy_seen"] for e in self.experiences])
-            ),
-            "average_forgetting": average_forgetting(acc, first),
             "final_feature_dim": last["feature_dim"],
             "final_parameter_count": last["parameter_count"],
             "total_train_time_s": float(sum(e["train_time_s"] for e in self.experiences)),
         }
+
+        # Include classification accuracy only when the experiment records it.
+        if "accuracy_seen" in last:
+            s["final_accuracy_seen"] = last["accuracy_seen"]
+            values = [
+                e["accuracy_seen"] for e in self.experiences if e.get("accuracy_seen") is not None
+            ]
+            if values:
+                s["average_accuracy_seen"] = float(np.mean(values))
+
+        if "accuracy_all" in last:
+            s["final_accuracy_all"] = last["accuracy_all"]
+
+        first = {int(k): int(v) for k, v in self.class_first_experience.items()}
+
+        if all("per_skill_target_recall" in e for e in self.experiences):
+            s["average_skill_forgetting"] = average_forgetting(
+                self.skill_target_recall_matrix(),
+                first,
+            )
+        elif all("per_class_accuracy" in e for e in self.experiences):
+            s["average_forgetting"] = average_forgetting(
+                self.accuracy_matrix(),
+                first,
+            )
+
         final_target = last.get("target_metrics")
         if self.mode == "target" and final_target:
             for k in (
@@ -108,6 +136,7 @@ class RunResult:
                 "auc",
             ):
                 s[f"final_{k}"] = final_target.get(k)
+
         self.summary = s
         return s
 
@@ -144,11 +173,20 @@ class RunResult:
             w.writerow(cols)
             for row in rows:
                 w.writerow([row.get(k) for k in cols])
-        with open(out / "per_class_accuracy.csv", "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["experience"] + [f"class_{c}" for c in range(self.num_classes)])
-            for e in self.experiences:
-                w.writerow([e["index"]] + [_clean(v) for v in e["per_class_accuracy"]])
+
+        if all("per_class_accuracy" in e for e in self.experiences):
+            with open(out / "per_class_accuracy.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["experience"] + [f"class_{c}" for c in range(self.num_classes)])
+                for e in self.experiences:
+                    w.writerow([e["index"]] + [_clean(v) for v in e["per_class_accuracy"]])
+
+        if all("per_skill_target_recall" in e for e in self.experiences):
+            with open(out / "skill_target_recall.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["experience"] + [f"skill_{c}" for c in range(self.num_classes)])
+                for e in self.experiences:
+                    w.writerow([e["index"]] + [_clean(v) for v in e["per_skill_target_recall"]])
         return out / "results.json"
 
     @classmethod

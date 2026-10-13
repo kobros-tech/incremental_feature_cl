@@ -3,12 +3,11 @@
 from .accuracy import correctness, masked_accuracy, per_class_accuracy, predict_dataset
 from .forgetting import average_forgetting, forgetting_per_class
 from .result_store import RunResult
-from .skill_metrics import argmax_accuracy, macro_metrics, per_skill_metrics
+from .skill_metrics import macro_metrics, per_skill_metrics
 from .target_metrics import binary_target_metrics, roc_auc
 
 __all__ = [
     "RunResult",
-    "argmax_accuracy",
     "average_forgetting",
     "binary_target_metrics",
     "correctness",

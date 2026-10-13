@@ -5,9 +5,9 @@
 
 Every skill ``c`` is judged exactly like a target-mode run with target ``c``: its own binary
 decision (``score > 0``) on the test samples of class ``c`` (positives) and of the other seen
-classes (negatives), through :func:`binary_target_metrics`.  Skill scores are independent logits
-that were never trained to be compared with each other, so the ``argmax`` accuracy is reported
-only as a separate, secondary diagnostic.
+classes (negatives), through :func:`binary_target_metrics`.  Skill scores are independent logits that were never trained to be compared with each other.
+Evaluation therefore uses each skill's binary target-vs-rest decision and does not report
+multiclass accuracy derived from the argmax of skill scores.
 """
 
 from __future__ import annotations
@@ -60,13 +60,3 @@ def macro_metrics(per_skill: dict[int, dict]) -> dict[str, float | int | None]:
     out["n_target"] = int(sum(m["n_target"] for m in per_skill.values()))
     out["n_seen_negative"] = int(np.mean([m["n_seen_negative"] for m in per_skill.values()]))
     return out
-
-
-def argmax_accuracy(
-    scores: np.ndarray, labels: np.ndarray, class_ids: Sequence[int], seen: Sequence[int]
-) -> float:
-    """Multiclass accuracy of ``argmax`` over raw skill logits on samples of seen classes (diagnostic)."""
-    ids = np.asarray(class_ids)
-    predicted = ids[scores.argmax(axis=1)]
-    mask = np.isin(labels, list(seen))
-    return float((predicted[mask] == labels[mask]).mean()) if mask.any() else float("nan")
