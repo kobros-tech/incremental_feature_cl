@@ -413,12 +413,12 @@ def add_common_args(
     p.add_argument(
         "--optimizer",
         choices=["sgd", "adam", "lbfgs"],
-        help="sgd (default) | adam; lbfgs = full-batch, Skills only (the Skills' default)",
+        help="sgd (default) | adam | lbfgs (full-batch, Skills only)",
     )
     p.add_argument(
         "--weight-decay",
         type=float,
-        help="L2 weight decay (Skills with lbfgs default to 1e-3)",
+        help="L2 weight decay for the selected optimizer",
     )
     p.add_argument("--replay-mem-size", type=int)
     p.add_argument("--seed", type=int)
@@ -530,15 +530,13 @@ def add_skill_args(p: argparse.ArgumentParser) -> None:
 def skill_config_from(cfg: ExperimentConfig, args: argparse.Namespace) -> SkillConfig:
     """Map the effective experiment configuration to a SkillConfig.
 
-    Skills default to the full-batch L-BFGS solver (``--optimizer sgd|adam`` selects minibatch
-    training instead).  SGD and Adam use epoch-based minibatch training (``--train-epochs``,
-    ``--train-mb-size``); L-BFGS ignores those and uses its own full-batch iteration limit
-    (``--skill-max-iter``).  These are different training loops.
+    Skills use the same selected optimizer and weight decay as the experiment configuration.
+    SGD and Adam use epoch-based minibatch training (``--train-epochs``,
+    ``--train-mb-size``); L-BFGS uses its full-batch iteration limit
+    (``--skill-max-iter``).  Optimizer selection and weight decay are never overridden here.
     """
-    optimizer = cfg.train.optimizer if args.optimizer else "lbfgs"
+    optimizer = cfg.train.optimizer
     weight_decay = cfg.train.weight_decay
-    if args.weight_decay is None and optimizer == "lbfgs":
-        weight_decay = 1e-3
     pos = args.skill_pos_weight
     pos_weight = None if pos == "none" else "balanced" if pos == "balanced" else float(pos)
 
