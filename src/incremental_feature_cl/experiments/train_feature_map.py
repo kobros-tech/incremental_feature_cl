@@ -29,6 +29,7 @@ from pathlib import Path
 from ..data.streams import format_ratio
 from .common import (
     add_common_args,
+    check_training_contract,
     config_from_args,
     estimate_train_samples,
     get_data,
@@ -54,6 +55,7 @@ def main(argv=None) -> None:
     )
     a = p.parse_args(argv)
     cfg = config_from_args(a, "target", "cifar100")
+    check_training_contract(p, a, cfg, skills=False)
     if a.no_target_in_every_experience:
         cfg.target_in_every_experience = False
     _, _, num_classes, _ = get_data(cfg)

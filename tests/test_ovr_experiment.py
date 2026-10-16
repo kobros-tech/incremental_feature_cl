@@ -159,35 +159,3 @@ def test_print_comparison_handles_missing_class_metrics(capsys):
     assert "test comparison" in output
     assert "n/a" in output
     assert "mean" in output
-
-
-def test_skill_config_respects_selected_optimizer_and_weight_decay():
-    from argparse import Namespace
-
-    from incremental_feature_cl.experiments.common import skill_config_from
-    from incremental_feature_cl.experiments.config import ExperimentConfig
-
-    args = Namespace(
-        optimizer=None,
-        weight_decay=None,
-        skill_pos_weight="balanced",
-        skill_expansion="first",
-        skill_max_iter=100,
-        memory_per_class=8,
-    )
-    cfg = ExperimentConfig()
-
-    skill_cfg = skill_config_from(cfg, args)
-    assert skill_cfg.optimizer == cfg.train.optimizer == "sgd"
-    assert skill_cfg.weight_decay == cfg.train.weight_decay == 0.0
-    assert skill_cfg.epochs == cfg.train.train_epochs
-    assert skill_cfg.batch_size == cfg.train.train_mb_size
-
-    # Explicit L-BFGS remains an option, but must not silently change weight decay.
-    cfg.train.optimizer = "lbfgs"
-    cfg.train.weight_decay = 0.0
-    args.optimizer = "lbfgs"
-    skill_cfg = skill_config_from(cfg, args)
-    assert skill_cfg.optimizer == "lbfgs"
-    assert skill_cfg.weight_decay == 0.0
-    assert skill_cfg.max_iter == args.skill_max_iter

@@ -104,19 +104,51 @@ python -m incremental_feature_cl.experiments.train_ovr --dataset synthetic --bac
 
 # baseline: raw pixels (identity) on CIFAR-100, with the feature-map comparison for class 0
 python -m incremental_feature_cl.experiments.train_ovr --dataset cifar100 --backbone identity \
-    --n-experiences 5 --ratio 1:5 --memory-per-class 100 --skill-max-iter 100 --seed 1 \
+    --n-experiences 5 --ratio 1:5 --memory-per-class 100 --train-epochs 10 --seed 1 \
     --no-plots --vs-feature-map 0
 
 # diagnostic: a learned representation (trained on experience 0, then frozen); needs avalanche-lib
 python -m incremental_feature_cl.experiments.train_ovr --dataset cifar100 --backbone simplemlp \
     --backbone-kwargs '{"hidden_size": 256}' --warmup-epochs 5 --freeze-backbone \
-    --n-experiences 5 --ratio 1:5 --memory-per-class 100 --skill-max-iter 100 --seed 1 \
+    --n-experiences 5 --ratio 1:5 --memory-per-class 100 --train-epochs 10 --seed 1 \
     --no-plots --vs-feature-map 0
+
+# full-batch L-BFGS for the skills (explicit; --vs-feature-map is then unavailable)
+python -m incremental_feature_cl.experiments.train_ovr --dataset cifar100 --backbone identity \
+    --n-experiences 5 --ratio 1:5 --memory-per-class 100 --optimizer lbfgs --skill-max-iter 100 \
+    --weight-decay 1e-3 --seed 1 --no-plots
 
 # scikit-learn control with the same data protocol (needs the research extra)
 python -m incremental_feature_cl.experiments.train_ovr --dataset synthetic --backbone identity \
     --n-experiences 5 --ratio 1:5 --vs-sklearn
 ```
+
+### Is the Skill-vs-feature-map gap the learner or the protocol?
+
+The two experiments differ in more than the model: negative sampling, replay and (before the training
+contract above) the optimizer. `compare_single_class` separates them for one class:
+
+```bash
+python -m incremental_feature_cl.experiments.compare_single_class --dataset cifar100 --backbone identity \
+    --target-class 0 --n-experiences 5 --ratio 1:5 --memory-per-class 100 --train-epochs 10 \
+    --train-mb-size 100000 --seed 1
+```
+
+* **Part 1 (matched learner).** The same frozen features, the same training / validation / test rows, the
+  same `pos_weight`, the same initial weights, the same optimizer and budget go through `Skill._fit` and
+  through the feature-map trainer; it prints the score agreement. With full-batch steps
+  (`--train-mb-size` larger than the training set) they agree to ~1e-7 (tested for SGD, Adam and feature
+  expansion). With minibatches only the shuffle order differs. The feature-map trainer has no L-BFGS, so
+  this part needs `--optimizer sgd|adam`.
+* **Part 2 (continual vs joint).** The continual Skill is compared with skills trained at once on all data:
+  `joint_memory_positives` (same positive budget as the replay) isolates the effect of learning
+  continually, and `joint_all_positives` isolates the replay budget. All are scored on identical test rows
+  with the same validated-threshold rule.
+
+If Part 1 agrees, a gap between the earlier results is not explained by the classifier; look at the data
+protocol (Part 2), the replay budget and the decision threshold instead. A high AUC with a low F1 at
+threshold 0 means a ranking that is fine and a threshold that is not; it says nothing about whether the
+learning procedure is correct.
 
 ### What is measured, and what deliberately is not
 
@@ -152,10 +184,15 @@ also reports it for the threshold-free AUC (`average_skill_auc_forgetting`) and 
 thresholds (`average_skill_tuned_recall_forgetting`). `skill_*_forgetting.csv` holds the running forgetting
 (best so far minus current) of every skill after every experience.
 
-**`--train-epochs` vs `--skill-max-iter`.** Skills use full-batch L-BFGS by default; `--skill-max-iter` is
-its iteration limit and `--train-epochs`, `--train-mb-size`, `--lr` are then unused. `--optimizer sgd|adam`
-switches the skills to epoch-based minibatch training. The Avalanche strategy always runs one epoch because
-the skills own their training loops.
+**Training contract (one explicit optimizer).** `--optimizer sgd|adam|lbfgs` is a single setting shared by
+every route and defaults to `sgd`; it is never inferred from the model. With `sgd`/`adam`, `--train-epochs`,
+`--train-mb-size` and `--lr` control the training. `lbfgs` is full-batch, available only to the Skill routes
+(`train_skill`, `train_ovr`), and is bounded by `--skill-max-iter` instead. Flags the chosen optimizer would
+silently ignore (`--skill-max-iter` without `lbfgs`, `--train-epochs` / `--train-mb-size` with `lbfgs`,
+`--optimizer lbfgs` on a feature-map route or with `--vs-feature-map`) are rejected, and every skill run
+prints a `[contract]` line stating what controls its training. Weight decay is the same
+(`--weight-decay`, default 0) for every optimizer; there is no L-BFGS-specific default. The Avalanche
+strategy always runs one epoch because the skills own their training loops.
 
 **`--vs-feature-map K ...`** trains `IncrementalFeatureMapModel` once per listed class; every other class
 shows `n/a` and the feature-map `mean` covers only the listed classes. One class is not evidence of a general

@@ -18,7 +18,7 @@ Scored like ``train_feature_map`` (target_acc = recall, neg_acc, bal_acc = their
 two experiments are directly comparable (``--vs-feature-map`` runs it for you).  ``--vs-sklearn``
 swaps the learner for ``LogisticRegression`` under the identical data protocol.  The skill is
 configured with the same flags as ``IncrementalFeatureMapModel`` (``--new-feature-dim``,
-``--activation``, ``--initialization`` ...); the default optimizer is full-batch L-BFGS.
+``--activation``, ``--initialization`` ...) and the same explicit ``--optimizer`` (sgd by default; lbfgs is opt-in).
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from .common import (
     add_common_args,
     add_skill_args,
     build_backbone_from,
+    check_training_contract,
     config_from_args,
     finish_skill_run,
     get_data,
@@ -49,6 +50,7 @@ from .common import (
     maybe_warm_up,
     print_comparison,
     skill_config_from,
+    training_contract,
 )
 from .common import (
     run_experiment as run_feature_map,
@@ -216,7 +218,9 @@ def main(argv=None) -> None:
     a = p.parse_args(argv)
     cfg = config_from_args(a, "target", "cifar100")
     cfg.model.freeze_backbone = True
+    check_training_contract(p, a, cfg, skills=True)
     skill_cfg = skill_config_from(cfg, a)
+    print(f"[contract] {training_contract(skill_cfg)}", flush=True)
     out = Path(cfg.output_dir)
     name = cfg.name
     run_dir = out / (name or f"skill_t{a.target_class}_{cfg.data.dataset}_s{cfg.seed}")

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 
-from .common import add_common_args, config_from_args, run_experiment
+from .common import add_common_args, check_training_contract, config_from_args, run_experiment
 
 
 def main(argv=None) -> None:
@@ -26,6 +26,7 @@ def main(argv=None) -> None:
     )
     a = p.parse_args(argv)
     cfg = config_from_args(a, "multiclass", "cifar100")
+    check_training_contract(p, a, cfg, skills=False)
     run_experiment(cfg, make_plots=not a.no_plots)
 
 

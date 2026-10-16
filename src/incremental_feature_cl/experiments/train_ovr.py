@@ -46,6 +46,7 @@ from .common import (
     add_common_args,
     add_skill_args,
     build_backbone_from,
+    check_training_contract,
     config_from_args,
     finish_skill_run,
     get_data,
@@ -53,6 +54,7 @@ from .common import (
     maybe_warm_up,
     print_comparison,
     skill_config_from,
+    training_contract,
 )
 from .common import run_experiment as run_feature_map
 
@@ -341,7 +343,9 @@ def main(argv=None) -> None:
     a = p.parse_args(argv)
     cfg = config_from_args(a, "target", "cifar100")
     cfg.model.freeze_backbone = True
+    check_training_contract(p, a, cfg, skills=True)
     skill_cfg = skill_config_from(cfg, a)
+    print(f"[contract] {training_contract(skill_cfg)}", flush=True)
     if not 0.0 <= a.val_fraction < 0.5:
         p.error("--val-fraction must be in [0, 0.5)")
     comparison = ComparisonConfig(weight=a.comparison_weight, epochs=a.comparison_epochs)

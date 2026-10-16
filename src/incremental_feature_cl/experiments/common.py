@@ -413,12 +413,16 @@ def add_common_args(
     p.add_argument(
         "--optimizer",
         choices=["sgd", "adam", "lbfgs"],
-        help="sgd (default) | adam | lbfgs (full-batch, Skills only)",
+        help="sgd (default) | adam | lbfgs. One setting for every route; never inferred from the "
+        "model. sgd/adam: --train-epochs, --train-mb-size, --lr control training. lbfgs: "
+        "full-batch, only the Skill routes (train_skill, train_ovr) support it; "
+        "--skill-max-iter controls it",
     )
     p.add_argument(
         "--weight-decay",
         type=float,
-        help="L2 weight decay for the selected optimizer",
+        help="L2 weight decay (default from the configuration, 0 unless set; the same for "
+        "every optimizer)",
     )
     p.add_argument("--replay-mem-size", type=int)
     p.add_argument("--seed", type=int)
@@ -522,32 +526,86 @@ def add_skill_args(p: argparse.ArgumentParser) -> None:
         default="first",
         help="when a skill grows its feature space by --new-feature-dim",
     )
-    p.add_argument("--skill-max-iter", type=int, default=100, help="L-BFGS iterations per update")
+    p.add_argument(
+        "--skill-max-iter",
+        type=int,
+        help="L-BFGS iteration limit per update (default 100); only valid with --optimizer lbfgs",
+    )
     p.add_argument("--vs-sklearn", action="store_true", help="also run the scikit-learn control")
     p.add_argument("--sklearn-c", type=float, default=1.0, help="LogisticRegression C")
+
+
+def check_training_contract(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    cfg: ExperimentConfig,
+    *,
+    skills: bool,
+) -> None:
+    """Fail early when a flag would silently stop controlling the training that is run.
+
+    ``skills`` is True for the Skill routes (``train_skill`` / ``train_ovr``), the only ones that
+    can run L-BFGS.  Only flags given explicitly on the command line are checked.
+    """
+
+    def given(name: str) -> bool:
+        return getattr(args, name, None) is not None
+
+    opt = cfg.train.optimizer
+    if opt == "lbfgs" and not skills:
+        parser.error(
+            "--optimizer lbfgs is full-batch and only supported by the Skill routes "
+            "(train_skill, train_ovr); the feature-map trainer needs sgd or adam"
+        )
+    if opt == "lbfgs" and getattr(args, "vs_feature_map", None):
+        parser.error(
+            "--vs-feature-map needs --optimizer sgd or adam (no L-BFGS feature-map trainer)"
+        )
+    if opt != "lbfgs" and given("skill_max_iter"):
+        parser.error(f"--skill-max-iter only controls --optimizer lbfgs (the optimizer is {opt})")
+    if opt == "lbfgs":
+        for flag in ("train_epochs", "train_mb_size"):
+            if given(flag):
+                parser.error(
+                    f"--{flag.replace('_', '-')} has no effect with --optimizer lbfgs "
+                    "(full-batch; use --skill-max-iter)"
+                )
+
+
+def training_contract(skill_cfg: SkillConfig) -> str:
+    """One line stating which options control the skills' training."""
+    c = skill_cfg
+    if c.optimizer == "lbfgs":
+        return (
+            f"skills train with lbfgs (full-batch): iterations<={c.max_iter}, "
+            f"weight_decay={c.weight_decay}; epochs/minibatch/lr/momentum are unused"
+        )
+    return (
+        f"skills train with {c.optimizer}: epochs={c.epochs}, minibatch={c.batch_size}, "
+        f"lr={c.lr}, weight_decay={c.weight_decay}; --skill-max-iter is unused"
+    )
 
 
 def skill_config_from(cfg: ExperimentConfig, args: argparse.Namespace) -> SkillConfig:
     """Map the effective experiment configuration to a SkillConfig.
 
-    Skills use the same selected optimizer and weight decay as the experiment configuration.
-    SGD and Adam use epoch-based minibatch training (``--train-epochs``,
-    ``--train-mb-size``); L-BFGS uses its full-batch iteration limit
-    (``--skill-max-iter``).  Optimizer selection and weight decay are never overridden here.
+    The optimizer, learning rate and weight decay are the experiment's own (``--optimizer``,
+    ``--lr``, ``--weight-decay``, default SGD), never inferred from the model route.  SGD and Adam
+    are epoch-based minibatch training (``--train-epochs``, ``--train-mb-size``); L-BFGS is
+    full-batch and ignores both, being bounded by ``--skill-max-iter`` instead.
+    :func:`check_training_contract` rejects flags that the chosen optimizer would silently ignore.
     """
-    optimizer = cfg.train.optimizer
-    weight_decay = cfg.train.weight_decay
     pos = args.skill_pos_weight
     pos_weight = None if pos == "none" else "balanced" if pos == "balanced" else float(pos)
 
     return SkillConfig(
         lr=cfg.train.lr,
         momentum=cfg.train.momentum,
-        weight_decay=weight_decay,
+        weight_decay=cfg.train.weight_decay,
         epochs=cfg.train.train_epochs,
         batch_size=cfg.train.train_mb_size,
-        optimizer=optimizer,
-        max_iter=args.skill_max_iter,
+        optimizer=cfg.train.optimizer,
+        max_iter=args.skill_max_iter if args.skill_max_iter is not None else SkillConfig.max_iter,
         feature_expansion_dim=cfg.model.new_feature_dim,
         activation=cfg.model.activation,
         initialization=cfg.model.initialization,
