@@ -25,7 +25,9 @@ def evaluate_state(
     batch_size: int = 256,
     device: str | torch.device = "cpu",
 ) -> dict[str, Any]:
-    dec, lab = predict_dataset(model, test_dataset, mode, batch_size, device)
+    dec, lab, scores = predict_dataset(
+        model, test_dataset, mode, batch_size, device, return_scores=True
+    )
     ok = correctness(dec, lab, mode, target_class)
     out: dict[str, Any] = {
         "per_class_accuracy": per_class_accuracy(ok, lab, num_classes).tolist(),
@@ -34,5 +36,5 @@ def evaluate_state(
     }
     if mode == "target":
         negs = [c for c in seen_classes if c != target_class]
-        out["target_metrics"] = binary_target_metrics(dec, lab, target_class, negs)
+        out["target_metrics"] = binary_target_metrics(dec, lab, target_class, negs, scores)
     return out

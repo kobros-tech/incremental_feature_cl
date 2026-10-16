@@ -38,7 +38,7 @@ SYN = "data.synthetic={n_classes: 9, n_train_per_class: 12, n_test_per_class: 6}
 
 def sweep_args(out, *extra, targets=("0", "3"), ratios=("5:1", "1:1", "1:5")):
     return [
-        "--dataset", "synthetic", "--backbone", "mlp", "--set", SYN,
+        "--dataset", "synthetic", "--backbone", "_backbones.mlp_factory", "--set", SYN,
         "--target-class", *targets, "--ratios", *ratios,
         "--n-experiences", "3", "--new-feature-dim", "2", "--train-epochs", "1",
         "--lr", "0.05", "--seed", "1", "--device", "cpu",
@@ -276,7 +276,7 @@ def test_realized_counts_recorded_for_multiclass_too():
     c = ExperimentConfig.from_dict({
         "mode": "multiclass", "data": {"dataset": "synthetic", "n_experiences": 2,
                                        "synthetic": {"n_classes": 4, "n_train_per_class": 8, "n_test_per_class": 4}},
-        "model": {"backbone": "mlp"}, "train": {"device": "cpu", "probe_size": 0}})  # fmt: skip
+        "model": {"backbone": "_backbones.mlp_factory"}, "train": {"device": "cpu", "probe_size": 0}})  # fmt: skip
     r = run_experiment(c, out_dir="/tmp/_ratio_mc", verbose=False, make_plots=False)
     assert [e["n_train_samples"] for e in r.experiences] == [16, 16]
     assert "n_train_target" not in r.experiences[0]

@@ -26,7 +26,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from .common import add_common_args, config_from_args, run_experiment
+from .common import add_common_args, check_training_contract, config_from_args, run_experiment
 
 
 def variants(replay: int, new_dim: int, with_replay: bool = True):
@@ -60,6 +60,7 @@ def main(argv=None) -> None:
     p.add_argument("--avalanche-baselines", default="", help="comma list: naive,replay,er_ace,ewc")
     a = p.parse_args(argv)
     cfg = config_from_args(a, a.mode, "cifar100")
+    check_training_contract(p, a, cfg, skills=False)
     cfg.target_class = a.target_class
     if cfg.model.new_feature_dim == 0:
         cfg.model.new_feature_dim = 16

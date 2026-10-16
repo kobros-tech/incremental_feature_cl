@@ -3,8 +3,9 @@
 import numpy as np
 import pytest
 import torch
+from _backbones import build_backbone
 
-from incremental_feature_cl import IncrementalFeatureMapModel, build_backbone
+from incremental_feature_cl import IncrementalFeatureMapModel
 from incremental_feature_cl.data import (
     binary_labels,
     build_target_vs_rest_stream,

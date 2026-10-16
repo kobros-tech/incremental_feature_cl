@@ -7,8 +7,7 @@ seed: 1
 output_dir: results
 data: {dataset: cifar100, root: ./data, n_experiences: 20}
 model:
-  backbone: slimresnet18
-  backbone_kwargs: {nf: 20}
+  backbone: resnet32
   new_feature_dim: 16
   initialization: zero
 train:

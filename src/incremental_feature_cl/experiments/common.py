@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -13,9 +14,15 @@ import numpy as np
 import torch
 
 from ..data import build_class_incremental_stream, build_target_vs_rest_stream, load_dataset
-from ..data.streams import ratio_report
+from ..data.streams import parse_ratio, ratio_report
 from ..evaluation.result_store import RunResult
-from ..models import IncrementalFeatureMapModel, build_backbone
+from ..models import (
+    IncrementalFeatureMapModel,
+    SkillConfig,
+    build_backbone,
+    warm_up_backbone,
+)
+from ..models.skill import EXPANSIONS
 from ..plotting import make_all_plots
 from ..training import ContinualTrainer, ExpansionPolicy, TrainerConfig, evaluate_state
 from ..utils.reproducibility import collect_environment, resolve_device, seed_everything
@@ -33,16 +40,16 @@ def get_data(cfg: ExperimentConfig):
     return _DATA_CACHE[key]
 
 
+def build_backbone_from(cfg: ExperimentConfig, input_shape: tuple[int, ...]) -> torch.nn.Module:
+    """The external backbone named by ``cfg.model`` (see ``models/backbones.py``)."""
+    m = cfg.model
+    return build_backbone(m.backbone, input_shape, m.backbone_kwargs, m.backbone_weights)
+
+
 def build_model(cfg: ExperimentConfig, input_shape: tuple[int, ...], num_outputs: int = 1):
     m = cfg.model
-    kw = dict(m.backbone_kwargs)
-    if m.backbone in ("identity", "mlp"):
-        kw.setdefault("in_dim", int(np.prod(input_shape)))
-    else:
-        kw.setdefault("in_channels", input_shape[0])
-    backbone = build_backbone(m.backbone, **kw)
     return IncrementalFeatureMapModel(
-        backbone,
+        build_backbone_from(cfg, input_shape),
         num_outputs=num_outputs,
         activation=m.activation,
         initialization=m.initialization,
@@ -50,6 +57,43 @@ def build_model(cfg: ExperimentConfig, input_shape: tuple[int, ...], num_outputs
         freeze_backbone=m.freeze_backbone,
         freeze_old_blocks=m.freeze_old_blocks,
         seed=cfg.seed,
+    )
+
+
+def materialize(dataset, batch_size: int = 512) -> tuple[torch.Tensor, torch.Tensor]:
+    """Read a dataset through ``__getitem__`` (uint8 images are converted and normalized)."""
+    from torch.utils.data import DataLoader
+
+    xs, ys = [], []
+    for x, y in DataLoader(dataset, batch_size=batch_size, shuffle=False):
+        xs.append(x)
+        ys.append(y)
+    return torch.cat(xs), torch.cat(ys)
+
+
+def maybe_warm_up(cfg: ExperimentConfig, backbone: torch.nn.Module, first_experience) -> None:
+    """``--warmup-epochs N``: train the backbone on experience 0, then freeze it."""
+    if cfg.model.warmup_epochs <= 0:
+        return
+    if not cfg.model.freeze_backbone:
+        raise ValueError(
+            "--warmup-epochs only makes sense with a frozen backbone (--freeze-backbone)"
+        )
+    x, y = materialize(first_experience.dataset)
+    loss = warm_up_backbone(
+        backbone,
+        x,
+        y,
+        cfg.model.warmup_epochs,
+        lr=cfg.train.lr,
+        batch_size=cfg.train.train_mb_size,
+        device=cfg.train.device,
+        seed=cfg.seed,
+    )
+    print(
+        f"[warm-up] backbone trained {cfg.model.warmup_epochs} epochs on experience 0 "
+        f"(loss {loss:.4f}) and frozen",
+        flush=True,
     )
 
 
@@ -122,12 +166,22 @@ def _trainer_cfg(cfg: ExperimentConfig, device: str) -> TrainerConfig:
 
 
 def _print_row(rec: dict, mode: str) -> None:
-    extra = (
-        f" target_acc={rec['target_metrics']['target_accuracy']:.3f}"
-        f" neg_acc={rec['target_metrics']['negative_accuracy']:.3f}"
-        if mode == "target"
-        else ""
-    )
+    extra = ""
+    if mode == "target":
+        tm = rec["target_metrics"]
+        extra = (
+            f" target_acc={tm['target_accuracy']:.3f} neg_acc={tm['negative_accuracy']:.3f}"
+            f" bal_acc={tm['balanced_accuracy']:.3f}"
+        )
+        if tm.get("auc") is not None:
+            extra += f" auc={tm['auc']:.3f}"
+        cov = rec.get("negative_coverage")
+        if cov:
+            extra += (
+                f" negs(old {cov['old_covered']}/{cov['old_negative_classes']}"
+                f" new {cov['new_covered']}/{cov['new_negative_classes']}"
+                f"{'' if cov['complete'] else ' INCOMPLETE'})"
+            )
     probe = rec.get("probe")
     pr = f" |dlogit|={probe['logit_max_abs_diff_expansion']:.1e}" if probe else ""
     print(
@@ -145,7 +199,11 @@ def run_experiment(
     verbose: bool = True,
     avalanche_baseline: str | None = None,
 ) -> RunResult:
-    """Run one experiment. ``avalanche_baseline`` (e.g. 'replay') uses an Avalanche method instead."""
+    """Train IncrementalFeatureMapModel on one target-vs-rest (or class-incremental) stream.
+
+    ``backend="avalanche"`` (multiclass only) or ``avalanche_baseline`` (e.g. ``"replay"``) runs
+    the same benchmark through Avalanche instead of the built-in trainer.
+    """
     if avalanche_baseline is not None or cfg.backend == "avalanche":
         cfg.backend = "avalanche"
     cfg.train.device = str(resolve_device(cfg.train.device))
@@ -155,7 +213,8 @@ def run_experiment(
     out = Path(out_dir) if out_dir else Path(cfg.output_dir) / cfg.name
     if verbose:
         print(
-            f"[{cfg.name}] mode={cfg.mode} backend={cfg.backend} device={cfg.train.device}",
+            f"[{cfg.name}] mode={cfg.mode} backend={cfg.backend} "
+            f"backbone={cfg.model.backbone} device={cfg.train.device}",
             flush=True,
         )
 
@@ -164,6 +223,7 @@ def run_experiment(
     else:
         stream = build_stream(cfg, train, test)
         model = build_model(cfg, shape, num_outputs=1)
+        maybe_warm_up(cfg, model.backbone, stream.train[0])
         policy = ExpansionPolicy(cfg.model.new_feature_dim, cfg.model.initialization)
         trainer = ContinualTrainer(model, policy, _trainer_cfg(cfg, cfg.train.device))
         recs = trainer.fit(stream, (lambda r: _print_row(r, cfg.mode)) if verbose else None)
@@ -183,8 +243,14 @@ def run_experiment(
         make_all_plots(result, out)
     if verbose:
         s = result.summary
+        tail = ""
+        if s.get("final_balanced_accuracy") is not None:
+            tail = f" final_bal_acc={s['final_balanced_accuracy']:.3f}"
+            if s.get("final_auc") is not None:
+                tail += f" final_auc={s['final_auc']:.3f}"
         print(
-            f"[{cfg.name}] final_acc_seen={s['final_accuracy_seen']:.3f} avg_acc={s['average_accuracy_seen']:.3f}"
+            f"[{cfg.name}] final_acc_seen={s['final_accuracy_seen']:.3f}{tail}"
+            f" avg_acc={s['average_accuracy_seen']:.3f}"
             f" avg_forgetting={s['average_forgetting']:.3f} -> {out}",
             flush=True,
         )
@@ -306,6 +372,7 @@ def add_common_args(
     default_dataset: str,
     *,
     include_target_ratio: bool = True,
+    ratio_default: str | None = None,
 ) -> None:
     p.add_argument("--config", help="YAML config (CLI flags and --set override it)")
     p.add_argument(
@@ -317,19 +384,46 @@ def add_common_args(
         help="generic override, e.g. --set train.lr=0.05",
     )
     p.add_argument(
-        "--dataset", default=None, help=f"synthetic|cifar10|cifar100 (default {default_dataset})"
+        "--dataset",
+        default=None,
+        help=f"synthetic|digits|digitpairs|cifar10|cifar100 (default {default_dataset})",
     )
     p.add_argument("--root", default=None, help="dataset root")
     p.add_argument("--n-experiences", type=int)
     p.add_argument("--new-feature-dim", type=int, help="0 = fixed-dimension baseline")
     p.add_argument("--initialization", choices=["zero", "random"])
-    p.add_argument("--backbone")
+    p.add_argument(
+        "--backbone",
+        help="identity | simplemlp | resnet32 | dotted path of any nn.Module class/factory "
+        "(default identity); the Avalanche models need avalanche-lib",
+    )
+    p.add_argument("--backbone-kwargs", help="JSON for the backbone, e.g. '{\"hidden_size\": 256}'")
+    p.add_argument("--backbone-weights", help="state dict (.pt) to load into the external model")
+    p.add_argument(
+        "--warmup-epochs",
+        type=int,
+        help="train the backbone on experience 0, then freeze it (needs --freeze-backbone)",
+    )
     p.add_argument("--freeze-backbone", action="store_true", default=None)
     p.add_argument("--freeze-old-blocks", action="store_true", default=None)
     p.add_argument("--train-epochs", type=int)
     p.add_argument("--train-mb-size", type=int)
     p.add_argument("--eval-mb-size", type=int)
     p.add_argument("--lr", type=float)
+    p.add_argument(
+        "--optimizer",
+        choices=["sgd", "adam", "lbfgs"],
+        help="sgd (default) | adam | lbfgs. One setting for every route; never inferred from the "
+        "model. sgd/adam: --train-epochs, --train-mb-size, --lr control training. lbfgs: "
+        "full-batch, only the Skill routes (train_skill, train_ovr) support it; "
+        "--skill-max-iter controls it",
+    )
+    p.add_argument(
+        "--weight-decay",
+        type=float,
+        help="L2 weight decay (default from the configuration, 0 unless set; the same for "
+        "every optimizer)",
+    )
     p.add_argument("--replay-mem-size", type=int)
     p.add_argument("--seed", type=int)
     p.add_argument("--device", help="auto|cpu|cuda")
@@ -337,14 +431,17 @@ def add_common_args(
     p.add_argument("--name")
     if include_target_ratio:
         p.add_argument(
-            "--target-to-negatives",
-            type=float,
+            "--ratio",
+            default=ratio_default,
+            metavar="TARGET:NEGATIVE",
             help=(
-                "target:negative training ratio (target mode only): "
-                "0.2 = 1 target : 5 negatives, 1 = 1:1; "
-                "omit to keep cumulative negative sampling"
+                "training ratio target:negative, e.g. 1:5 (one target per five negatives), 1:1, "
+                "5:1; 'cumulative' keeps every cumulative negative"
+                + (f" (default {ratio_default})" if ratio_default else " (default: cumulative)")
             ),
         )
+        # deprecated spelling of --ratio (targets per negative as a number); kept for old scripts
+        p.add_argument("--target-to-negatives", type=float, help=argparse.SUPPRESS)
     p.add_argument("--no-plots", action="store_true")
 
 
@@ -355,19 +452,23 @@ _FLAG_TO_KEY = {
     "new_feature_dim": "model.new_feature_dim",
     "initialization": "model.initialization",
     "backbone": "model.backbone",
+    "backbone_weights": "model.backbone_weights",
+    "warmup_epochs": "model.warmup_epochs",
     "freeze_backbone": "model.freeze_backbone",
     "freeze_old_blocks": "model.freeze_old_blocks",
     "train_epochs": "train.train_epochs",
     "train_mb_size": "train.train_mb_size",
     "eval_mb_size": "train.eval_mb_size",
     "lr": "train.lr",
+    "optimizer": "train.optimizer",
+    "weight_decay": "train.weight_decay",
     "replay_mem_size": "train.replay_mem_size",
     "seed": "seed",
     "device": "train.device",
     "output_dir": "output_dir",
     "name": "name",
     "target_to_negatives": "target_to_negatives",
-}
+}  # (a parsed --ratio is stored in args.target_to_negatives by config_from_args)
 
 
 def config_from_args(args: argparse.Namespace, mode: str, default_dataset: str) -> ExperimentConfig:
@@ -382,8 +483,16 @@ def config_from_args(args: argparse.Namespace, mode: str, default_dataset: str) 
         for k, v in loaded.items():
             d[k] = {**d[k], **v} if isinstance(v, dict) and isinstance(d.get(k), dict) else v
     d["mode"] = mode
-    if mode != "target" and getattr(args, "target_to_negatives", None) is not None:
-        raise ValueError("--target-to-negatives only applies to target-vs-rest (mode 'target')")
+    ratio_text = getattr(args, "ratio", None)
+    legacy_ratio = getattr(args, "target_to_negatives", None)
+    if ratio_text is not None and legacy_ratio is not None:
+        raise ValueError("use either --ratio or --target-to-negatives, not both")
+    if mode != "target" and (ratio_text is not None or legacy_ratio is not None):
+        raise ValueError("--ratio only applies to target-vs-rest (mode 'target')")
+    if ratio_text is not None:
+        args.target_to_negatives = parse_ratio(ratio_text)  # None for 'cumulative'
+        if args.target_to_negatives is None:
+            d["target_to_negatives"] = None
     if args.dataset is None and not in_cfg:
         d["data"]["dataset"] = default_dataset
     flags = [
@@ -392,7 +501,209 @@ def config_from_args(args: argparse.Namespace, mode: str, default_dataset: str) 
         if getattr(args, a, None) is not None
     ]
     apply_overrides(d, flags)
+    if getattr(args, "backbone_kwargs", None):
+        d["model"]["backbone_kwargs"] = json.loads(args.backbone_kwargs)
     apply_overrides(d, args.overrides)
-    if getattr(args, "backend", None):
-        d["backend"] = args.backend
     return ExperimentConfig.from_dict(d)
+
+
+# ---------------------------------------------------------------------- #
+# Skill experiments (train_skill / train_ovr)
+# ---------------------------------------------------------------------- #
+def add_skill_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--memory-per-class",
+        type=int,
+        default=100,
+        help="replay exemplars kept per class (default 100; 0 disables replay).  A refresh of an "
+        "old skill trains on its memory positives and --ratio times as many negatives, so very "
+        "small values starve it.  Not --replay-mem-size (the feature-map model's buffer).",
+    )
+    p.add_argument("--skill-pos-weight", default="balanced", help="balanced | none | number")
+    p.add_argument(
+        "--skill-expansion",
+        choices=EXPANSIONS,
+        default="first",
+        help="when a skill grows its feature space by --new-feature-dim",
+    )
+    p.add_argument(
+        "--skill-max-iter",
+        type=int,
+        help="L-BFGS iteration limit per update (default 100); only valid with --optimizer lbfgs",
+    )
+    p.add_argument("--vs-sklearn", action="store_true", help="also run the scikit-learn control")
+    p.add_argument("--sklearn-c", type=float, default=1.0, help="LogisticRegression C")
+
+
+def check_training_contract(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    cfg: ExperimentConfig,
+    *,
+    skills: bool,
+) -> None:
+    """Fail early when a flag would silently stop controlling the training that is run.
+
+    ``skills`` is True for the Skill routes (``train_skill`` / ``train_ovr``), the only ones that
+    can run L-BFGS.  Only flags given explicitly on the command line are checked.
+    """
+
+    def given(name: str) -> bool:
+        return getattr(args, name, None) is not None
+
+    opt = cfg.train.optimizer
+    if opt == "lbfgs" and not skills:
+        parser.error(
+            "--optimizer lbfgs is full-batch and only supported by the Skill routes "
+            "(train_skill, train_ovr); the feature-map trainer needs sgd or adam"
+        )
+    if opt == "lbfgs" and getattr(args, "vs_feature_map", None):
+        parser.error(
+            "--vs-feature-map needs --optimizer sgd or adam (no L-BFGS feature-map trainer)"
+        )
+    if opt != "lbfgs" and given("skill_max_iter"):
+        parser.error(f"--skill-max-iter only controls --optimizer lbfgs (the optimizer is {opt})")
+    if opt == "lbfgs":
+        for flag in ("train_epochs", "train_mb_size"):
+            if given(flag):
+                parser.error(
+                    f"--{flag.replace('_', '-')} has no effect with --optimizer lbfgs "
+                    "(full-batch; use --skill-max-iter)"
+                )
+
+
+def training_contract(skill_cfg: SkillConfig) -> str:
+    """One line stating which options control the skills' training."""
+    c = skill_cfg
+    if c.optimizer == "lbfgs":
+        return (
+            f"skills train with lbfgs (full-batch): iterations<={c.max_iter}, "
+            f"weight_decay={c.weight_decay}; epochs/minibatch/lr/momentum are unused"
+        )
+    return (
+        f"skills train with {c.optimizer}: epochs={c.epochs}, minibatch={c.batch_size}, "
+        f"lr={c.lr}, weight_decay={c.weight_decay}; --skill-max-iter is unused"
+    )
+
+
+def skill_config_from(cfg: ExperimentConfig, args: argparse.Namespace) -> SkillConfig:
+    """Map the effective experiment configuration to a SkillConfig.
+
+    The optimizer, learning rate and weight decay are the experiment's own (``--optimizer``,
+    ``--lr``, ``--weight-decay``, default SGD), never inferred from the model route.  SGD and Adam
+    are epoch-based minibatch training (``--train-epochs``, ``--train-mb-size``); L-BFGS is
+    full-batch and ignores both, being bounded by ``--skill-max-iter`` instead.
+    :func:`check_training_contract` rejects flags that the chosen optimizer would silently ignore.
+    """
+    pos = args.skill_pos_weight
+    pos_weight = None if pos == "none" else "balanced" if pos == "balanced" else float(pos)
+
+    return SkillConfig(
+        lr=cfg.train.lr,
+        momentum=cfg.train.momentum,
+        weight_decay=cfg.train.weight_decay,
+        epochs=cfg.train.train_epochs,
+        batch_size=cfg.train.train_mb_size,
+        optimizer=cfg.train.optimizer,
+        max_iter=args.skill_max_iter if args.skill_max_iter is not None else SkillConfig.max_iter,
+        feature_expansion_dim=cfg.model.new_feature_dim,
+        activation=cfg.model.activation,
+        initialization=cfg.model.initialization,
+        output_init=cfg.model.output_init,
+        freeze_old_blocks=cfg.model.freeze_old_blocks,
+        expansion=args.skill_expansion,
+        target_to_negatives=cfg.target_to_negatives,
+        pos_weight=pos_weight,
+        memory_per_class=args.memory_per_class,
+    )
+
+
+_COLUMNS = ("balanced_accuracy", "target_recall", "negative_accuracy", "target_f1", "auc")
+
+
+def print_comparison(title: str, rows_by_name: dict[str, list[dict | None]], ids) -> None:
+    """Side-by-side table of per-class target-vs-rest metrics."""
+
+    def cell(m: dict | None, k: str) -> str:
+        if m is None or m.get(k) is None:
+            return "    n/a"
+        return f"{m[k]:7.3f}"
+
+    def mean(rows: list[dict | None], k: str) -> dict:
+        vals = [row[k] for row in rows if row is not None and row.get(k) is not None]
+        return {k: float(np.mean(vals)) if vals else None}
+
+    names = list(rows_by_name)
+    head = " ".join(f"{h:>7}" for h in ("bal", "recall", "neg", "f1", "auc"))
+
+    print(f"\n{title}")
+    print(f"{'class':>6} | " + " | ".join(f"{n:^39}" for n in names))
+    print(f"{'':>6} | " + " | ".join(head for _ in names))
+
+    for i, class_id in enumerate(ids):
+        print(
+            f"{class_id:>6} | "
+            + " | ".join(
+                " ".join(cell(rows_by_name[name][i], metric) for metric in _COLUMNS)
+                for name in names
+            )
+        )
+
+    if len(ids) > 1:
+        print(
+            f"{'mean':>6} | "
+            + " | ".join(
+                " ".join(cell(mean(rows_by_name[name], metric), metric) for metric in _COLUMNS)
+                for name in names
+            )
+        )
+
+
+def finish_skill_run(result: RunResult, out_dir: Path, make_plots: bool) -> None:
+    """Summarize, save and plot a result whose records follow the skill record layout."""
+    from ..plotting import (
+        plot_accuracy_heatmap,
+        plot_accuracy_vs_class,
+        plot_accuracy_vs_experience,
+        plot_class_accuracy_curves,
+        plot_feature_growth,
+        plot_forgetting_vs_class,
+    )
+
+    result.compute_summary()
+    result.save(out_dir)
+    if make_plots:
+        plots = Path(out_dir) / "plots"
+        plot_accuracy_vs_experience(result, plots / "A_accuracy_vs_experience.png")
+        plot_accuracy_vs_class(result, plots / "B_accuracy_vs_class.png")
+        plot_accuracy_heatmap(result, plots / "C_class_accuracy_heatmap.png")
+        plot_class_accuracy_curves(result, plots / "D_class_accuracy_curves.png")
+        plot_forgetting_vs_class(result, plots / "E_forgetting_vs_class.png")
+        plot_feature_growth(result, plots / "F_feature_growth.png")
+    s = result.summary
+    auc = f" final_auc={s['final_auc']:.3f}" if s.get("final_auc") is not None else ""
+
+    if "average_skill_forgetting" in s:
+        forgetting = s["average_skill_forgetting"]
+        forgetting_label = "avg_skill_forgetting"
+        metric_description = "skill target recall"
+    else:
+        # Preserve compatibility with existing skill-style runs that still
+        # report class-wise accuracy forgetting.
+        forgetting = s.get("average_forgetting")
+        forgetting_label = "avg_forgetting"
+        metric_description = "balanced accuracy per class"
+
+    forgetting_text = (
+        f"{forgetting_label}={forgetting:.3f}"
+        if forgetting is not None
+        else f"{forgetting_label}=n/a"
+    )
+
+    print(
+        f"[{result.config.get('name', '')}] "
+        f"final_bal_acc={s['final_balanced_accuracy']:.3f}{auc} "
+        f"final_f1={s['final_target_f1']:.3f} "
+        f"{forgetting_text} ({metric_description}) -> {out_dir}",
+        flush=True,
+    )

@@ -59,6 +59,7 @@ from ..plotting.ratio_sweep import (
 from ..utils.reproducibility import collect_environment, resolve_device
 from .common import (
     add_common_args,
+    check_training_contract,
     config_from_args,
     get_data,
     large_run_warning,
@@ -342,6 +343,7 @@ def main(argv=None) -> None:
     try:
         ratios = parse_ratios(a.ratios, include_cumulative=not a.no_cumulative)
         cfg = config_from_args(a, "target", "cifar100")
+        check_training_contract(p, a, cfg, skills=False)
         pws = parse_pos_weights(a.pos_weights) if a.pos_weights else [cfg.train.pos_weight]
     except ValueError as e:
         p.error(str(e))

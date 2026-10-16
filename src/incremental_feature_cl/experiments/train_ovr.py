@@ -1,0 +1,420 @@
+# Copyright (c) 2026 Kobros-Tech Ltd
+# SPDX-License-Identifier: MIT
+"""OneVsRestSkillModel: one Skill per class, learning continuously over a class-incremental stream.
+
+    python -m incremental_feature_cl.experiments.train_ovr \
+        --dataset cifar100 --n-experiences 5 --ratio 1:5 --memory-per-class 100 \
+        --backbone simplemlp --backbone-kwargs '{"hidden_size": 256}' --warmup-epochs 5 \
+        --freeze-backbone --vs-sklearn --vs-feature-map 0 17 50
+
+After each experience ALL skills are refreshed: the new classes become negatives of every old
+skill (and the old classes negatives of every new skill) on top of each skill's replay memory.
+The log line proves it: ``refreshed 80/80 old skills (negatives: new classes 100%, old classes
+100% ...)``.  The backbone is any external ``nn.Module`` (see ``models/backbones.py``).
+
+Each skill is scored like a ``train_feature_map`` run with that class as target (its own decision
+``logit > 0`` on its class vs. the other seen classes): the headline numbers are means over skills
+of ``recall``, ``neg_acc``, ``bal_acc`` = (recall + neg_acc) / 2, ``f1`` and ``auc``.
+Independent skill scores are not treated as multiclass predictions.
+
+``--vs-feature-map K ...`` runs IncrementalFeatureMapModel for those classes and ``--vs-sklearn``
+the scikit-learn control (same data protocol) and prints everything side by side.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import math
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from ..data import build_class_incremental_stream
+from ..evaluation import (
+    decision_report,
+    macro_metrics,
+    per_skill_metrics,
+    select_thresholds,
+)
+from ..evaluation.result_store import RunResult
+from ..models import ComparisonConfig, OneVsRestSkillModel
+from ..utils.reproducibility import collect_environment, resolve_device, seed_everything
+from .common import (
+    add_common_args,
+    add_skill_args,
+    build_backbone_from,
+    check_training_contract,
+    config_from_args,
+    finish_skill_run,
+    get_data,
+    materialize,
+    maybe_warm_up,
+    print_comparison,
+    skill_config_from,
+    training_contract,
+)
+from .common import run_experiment as run_feature_map
+
+
+def split_validation(
+    x: torch.Tensor, y: torch.Tensor, fraction: float, seed: int
+) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+    """Hold out ``fraction`` of every class (at least one sample, never all) for validation.
+
+    Deterministic in ``seed``.  Returns ``((x_train, y_train), (x_val, y_val))``.  Classes with a
+    single sample stay entirely in the training part.
+    """
+    if not 0.0 < fraction < 1.0:
+        raise ValueError(f"validation fraction must be in (0, 1), got {fraction}")
+    rng = np.random.default_rng(seed)
+    y_np = y.cpu().numpy()
+    val_idx: list[int] = []
+    for c in np.unique(y_np):
+        idx = np.flatnonzero(y_np == c)
+        if len(idx) < 2:
+            continue
+        k = min(len(idx) - 1, max(1, round(fraction * len(idx))))
+        val_idx += rng.choice(idx, k, replace=False).tolist()
+    is_val = np.zeros(len(y_np), dtype=bool)
+    is_val[val_idx] = True
+    keep, val = torch.as_tensor(~is_val), torch.as_tensor(is_val)
+    return (x[keep], y[keep]), (x[val], y[val])
+
+
+def refresh_report(info: dict, seen: list[int], new_classes: list[int]) -> dict:
+    """Did this experience refresh the old skills against old AND new negatives?"""
+    old = list(info["updated_old_skills"])
+    trained = [c for c in old if info["skills"][c].get("trained")]
+    new_cov, old_cov = [], []
+    for c in trained:
+        used = set(info["skills"][c].get("negatives_used_per_class", {}))
+        want_new = set(new_classes) - {c}
+        want_old = (set(seen) - set(new_classes)) - {c}
+        new_cov.append(len(used & want_new) / len(want_new) if want_new else 1.0)
+        old_cov.append(len(used & want_old) / len(want_old) if want_old else 1.0)
+    return {
+        "old_skills": len(old),
+        "old_skills_refreshed": len(trained),
+        "new_class_coverage": float(np.mean(new_cov)) if new_cov else None,
+        "old_class_coverage": float(np.mean(old_cov)) if old_cov else None,
+        "mean_positives": float(np.mean([info["skills"][c]["n_positive"] for c in trained]))
+        if trained
+        else None,
+        "mean_negatives": float(np.mean([info["skills"][c]["n_negative"] for c in trained]))
+        if trained
+        else None,
+    }
+
+
+def run_ovr(
+    cfg,
+    skill_cfg,
+    comparison: ComparisonConfig,
+    out_dir: Path,
+    build_model=None,
+    make_plots: bool = True,
+    label: str = "ovr",
+    val_fraction: float = 0.0,
+) -> RunResult:
+    cfg.train.device = str(resolve_device(cfg.train.device))
+    cfg.model.freeze_backbone = True  # skills replay features: the representation is fixed
+    device = torch.device(cfg.train.device)
+    seed_everything(cfg.seed)
+
+    train, test, num_classes, shape = get_data(cfg)
+    stream = build_class_incremental_stream(
+        train, test, cfg.data.n_experiences, cfg.seed, cfg.data.class_order
+    )
+    backbone = build_backbone_from(cfg, shape).to(device)
+    maybe_warm_up(cfg, backbone, stream.train[0])
+    model = (build_model or OneVsRestSkillModel)(
+        backbone,
+        config=skill_cfg,
+        seed=cfg.seed,
+        **({} if build_model else {"comparison": comparison}),
+    ).to(device)
+
+    x_test, y_test = materialize(test)
+    h_test = model.extract(x_test.to(device)).cpu()  # frozen representation: computed once
+    labels = y_test.numpy()
+    cfg.name = cfg.name or (
+        f"{label}_{cfg.data.dataset}_e{cfg.data.n_experiences}_d{cfg.model.new_feature_dim}"
+        f"_m{skill_cfg.memory_per_class}_s{cfg.seed}"
+    )
+    print(
+        f"[{cfg.name}] dataset={cfg.data.dataset} backbone={cfg.model.backbone} "
+        f"out_dim={backbone.out_dim} device={device} memory/class={skill_cfg.memory_per_class}"
+        + (f" comparison_weight={comparison.weight:g}" if comparison.enabled else ""),
+        flush=True,
+    )
+
+    records = []
+    val_features: list[torch.Tensor] = []
+    val_labels: list[torch.Tensor] = []
+    last_index = len(stream.train) - 1
+    for exp in stream.train:
+        started = time.time()
+        x, y = materialize(exp.dataset)
+        if val_fraction > 0:
+            # Held out of training; used only to pick decision thresholds.  The frozen
+            # representation makes the features computed now valid for every later experience.
+            (x, y), (x_val, y_val) = split_validation(
+                x, y, val_fraction, cfg.seed * 1009 + exp.index
+            )
+            val_features.append(model.extract(x_val.to(device)).cpu())
+            val_labels.append(y_val)
+        info = model.update(x, y, device=device)
+        train_time = time.time() - started
+
+        seen = stream.seen_classes(exp.index)
+        with torch.no_grad():
+            scores = model.decision_function_features(h_test.to(device)).cpu().numpy()
+        per_skill = per_skill_metrics(scores, labels, model.class_ids, seen)
+        macro = macro_metrics(per_skill)
+        # No argmax anywhere: which skills fire (score > threshold) on each test sample.
+        decisions = decision_report(
+            scores, labels, model.class_ids, seen, None, include_matrix=exp.index == last_index
+        )
+        tuned_extra: dict = {}
+        if val_features:
+            with torch.no_grad():
+                val_scores = (
+                    model.decision_function_features(torch.cat(val_features).to(device))
+                    .cpu()
+                    .numpy()
+                )
+            thresholds = select_thresholds(
+                val_scores, torch.cat(val_labels).numpy(), model.class_ids, seen
+            )
+            per_skill_tuned = per_skill_metrics(scores, labels, model.class_ids, seen, thresholds)
+            tuned_extra = {
+                "n_validation": int(sum(len(v) for v in val_labels)),
+                "thresholds": thresholds,
+                "target_metrics_tuned": macro_metrics(per_skill_tuned),
+                "per_skill_target_recall_tuned": [
+                    per_skill_tuned[c]["target_recall"] if c in per_skill_tuned else None
+                    for c in range(num_classes)
+                ],
+                "per_skill_tuned": {
+                    c: {
+                        k: m[k]
+                        for k in (
+                            "threshold",
+                            "target_precision",
+                            "target_recall",
+                            "target_f1",
+                            "false_positive_rate",
+                        )
+                    }
+                    for c, m in per_skill_tuned.items()
+                },
+                "decision_report_tuned": decision_report(
+                    scores,
+                    labels,
+                    model.class_ids,
+                    seen,
+                    thresholds,
+                    include_matrix=exp.index == last_index,
+                ),
+            }
+        refresh = refresh_report(info, seen, exp.new_classes)
+        losses = [
+            v["train_loss"]
+            for v in info["skills"].values()
+            if v.get("trained")
+            and v.get("train_loss") is not None
+            and not math.isnan(v["train_loss"])
+        ]
+        dims = {c: s.total_feature_dim for c, s in model.skills.items()}
+        rec = {
+            "index": exp.index,
+            "classes": exp.classes,
+            "new_classes": exp.new_classes,
+            "seen_classes": seen,
+            "train_loss": float(np.mean(losses)) if losses else None,
+            "train_time_s": train_time,
+            # Per-skill target recall: measures whether each skill recognizes
+            # its own class, independently of comparisons between skill logits.
+            "per_skill_target_recall": [
+                per_skill[c]["target_recall"] if c in per_skill else None
+                for c in range(num_classes)
+            ],
+            "per_skill_auc": [
+                per_skill[c]["auc"] if c in per_skill else None for c in range(num_classes)
+            ],
+            "target_metrics": macro,  # mean over skills, decision ``score > 0`` (headline)
+            "per_skill_metrics": per_skill,
+            "decision_report": decisions,
+            **tuned_extra,
+            "refresh": refresh,
+            "comparison": info.get("comparison"),
+            "feature_dim": max(dims.values(), default=model.feature_dim),
+            "number_of_skills": info["number_of_skills"],
+            "new_skills": info["new_skills"],
+            "updated_old_skills": info["updated_old_skills"],
+            "parameter_count": model.parameter_count(),
+            "trainable_parameter_count": info["trainable_parameter_count"],
+        }
+        records.append(rec)
+        auc = f"{macro['auc']:.3f}" if macro["auc"] is not None else "n/a"
+        row = (
+            f"  exp {exp.index:>2} skills={rec['number_of_skills']:<3} "
+            f"bal_acc={macro['balanced_accuracy']:.3f} recall={macro['target_recall']:.3f} "
+            f"prec={macro['target_precision']:.3f} neg_acc={macro['negative_accuracy']:.3f} "
+            f"f1={macro['target_f1']:.3f} auc={auc}"
+        )
+        if refresh["old_skills"]:
+            row += (
+                f" | refreshed {refresh['old_skills_refreshed']}/{refresh['old_skills']} old skills"
+            )
+            if refresh["old_skills_refreshed"]:
+                row += (
+                    f" (negatives: new classes {refresh['new_class_coverage']:.0%}, old classes "
+                    f"{refresh['old_class_coverage']:.0%}; pos/neg per update "
+                    f"{refresh['mean_positives']:.0f}/{refresh['mean_negatives']:.0f})"
+                )
+            else:
+                row += "  WARNING: old skills cannot be refreshed without --memory-per-class > 0"
+        print(row, flush=True)
+        print(
+            f"      @threshold 0: exact_match={decisions['exact_match_rate']:.3f} "
+            f"none_fired={decisions['none_fired_rate']:.3f} "
+            f"multi_fired={decisions['multi_fired_rate']:.3f}",
+            flush=True,
+        )
+        if tuned_extra:
+            tm, dt = tuned_extra["target_metrics_tuned"], tuned_extra["decision_report_tuned"]
+            print(
+                f"      @validated thresholds (n_val={tuned_extra['n_validation']}): "
+                f"recall={tm['target_recall']:.3f} prec={tm['target_precision']:.3f} "
+                f"f1={tm['target_f1']:.3f} bal_acc={tm['balanced_accuracy']:.3f} | "
+                f"exact_match={dt['exact_match_rate']:.3f} none_fired={dt['none_fired_rate']:.3f} "
+                f"multi_fired={dt['multi_fired_rate']:.3f}",
+                flush=True,
+            )
+
+    result = RunResult(
+        {**cfg.to_dict(), "skill_config": vars(skill_cfg)},
+        collect_environment(),
+        "target",
+        num_classes,
+        stream.class_order,
+        stream.class_first_experience(),
+        records,
+    )
+    finish_skill_run(result, out_dir, make_plots)
+    return result
+
+
+def main(argv=None) -> None:
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        allow_abbrev=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_common_args(p, "cifar100", ratio_default="1:5")
+    add_skill_args(p)
+    p.add_argument(
+        "--comparison-weight",
+        type=float,
+        default=0.0,
+        help="weight of the softmax cross-entropy over skills in the joint comparison "
+        "phase (0 = off: skills stay independent)",
+    )
+    p.add_argument("--comparison-epochs", type=int, default=1)
+    p.add_argument(
+        "--val-fraction",
+        type=float,
+        default=0.1,
+        help="fraction of every class's training data held out to choose per-skill decision "
+        "thresholds (never the test set; 0 = no validation set, only the threshold-0 decision "
+        "is reported and training uses all data)",
+    )
+    p.add_argument(
+        "--vs-feature-map",
+        type=int,
+        nargs="+",
+        metavar="CLASS",
+        help="also run IncrementalFeatureMapModel for these classes and compare",
+    )
+    a = p.parse_args(argv)
+    cfg = config_from_args(a, "target", "cifar100")
+    cfg.model.freeze_backbone = True
+    check_training_contract(p, a, cfg, skills=True)
+    skill_cfg = skill_config_from(cfg, a)
+    print(f"[contract] {training_contract(skill_cfg)}", flush=True)
+    if not 0.0 <= a.val_fraction < 0.5:
+        p.error("--val-fraction must be in [0, 0.5)")
+    comparison = ComparisonConfig(weight=a.comparison_weight, epochs=a.comparison_epochs)
+    run_dir = Path(cfg.output_dir) / (cfg.name or f"ovr_{cfg.data.dataset}_s{cfg.seed}")
+    result = run_ovr(
+        cfg,
+        skill_cfg,
+        comparison,
+        run_dir,
+        make_plots=not a.no_plots,
+        val_fraction=a.val_fraction,
+    )
+    final = result.experiences[-1]["per_skill_metrics"]
+    ids = sorted(final)
+    rows = {"skill": [final[c] for c in ids]}
+
+    if a.vs_sklearn:
+        from ..evaluation.sklearn_skill import SklearnOneVsRest
+
+        c = copy.deepcopy(cfg)
+        c.name = f"sklearn_{result.config['name']}"
+        sk = run_ovr(
+            c,
+            skill_cfg,
+            comparison,
+            run_dir / "vs_sklearn",
+            build_model=lambda bb, config, seed: SklearnOneVsRest(
+                bb, config=config, seed=seed, C=a.sklearn_c
+            ),
+            make_plots=False,
+            label="sklearn",
+            val_fraction=a.val_fraction,
+        )
+        per = sk.experiences[-1]["per_skill_metrics"]
+        rows["sklearn"] = [per[c_] for c_ in ids]
+    if a.vs_feature_map:
+        requested = set(a.vs_feature_map)
+        unknown = requested - set(ids)
+        if unknown:
+            raise ValueError(f"--vs-feature-map contains unknown class IDs: {sorted(unknown)}")
+
+        feature_map_by_class = {}
+
+        for class_id in sorted(requested):
+            c = copy.deepcopy(cfg)
+            c.mode = "target"
+            c.target_class = class_id
+            c.name = c.auto_name()
+
+            r = run_feature_map(
+                c,
+                out_dir=run_dir / "vs_feature_map" / f"target_{class_id}",
+                make_plots=False,
+                verbose=False,
+            )
+
+            feature_map_by_class[class_id] = r.experiences[-1]["target_metrics"]
+
+        # Keep the same row order as the Skill results.
+        # Classes not requested are intentionally shown as n/a.
+        rows["feature_map"] = [feature_map_by_class.get(class_id) for class_id in ids]
+    if len(rows) > 1:
+        print_comparison("final experience, target-vs-rest over all seen classes:", rows, ids)
+        if a.vs_feature_map:
+            print(
+                "(feature_map is n/a for classes not listed in --vs-feature-map, and its mean "
+                "covers only the listed classes: that model is trained once per requested class)"
+            )
+
+
+if __name__ == "__main__":
+    main()

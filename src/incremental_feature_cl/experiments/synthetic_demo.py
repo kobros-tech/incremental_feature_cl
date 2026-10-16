@@ -31,7 +31,7 @@ def main(argv=None) -> None:
                     "n_experiences": 5,
                     "synthetic": {"n_classes": 10, "n_train_per_class": 40, "n_test_per_class": 20},
                 },
-                "model": {"backbone": "smallconv", "new_feature_dim": 8, "initialization": init},
+                "model": {"backbone": "identity", "new_feature_dim": 8, "initialization": init},
                 "train": {"train_epochs": 3, "lr": 0.05, "device": "cpu", "train_mb_size": 16},
             }
         )

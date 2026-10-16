@@ -18,7 +18,13 @@ import csv
 import itertools
 from pathlib import Path
 
-from .common import add_common_args, config_from_args, estimate_train_samples, run_experiment
+from .common import (
+    add_common_args,
+    check_training_contract,
+    config_from_args,
+    estimate_train_samples,
+    run_experiment,
+)
 from .config import apply_overrides, parse_override_value
 
 PRESETS = {
@@ -43,6 +49,7 @@ def main(argv=None) -> None:
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args(argv)
     cfg = config_from_args(a, a.mode, "cifar100")
+    check_training_contract(p, a, cfg, skills=False)
     cfg.target_class = a.target_class
     grid = dict(PRESETS[a.preset]) if a.preset else {}
     for g in a.grid:
