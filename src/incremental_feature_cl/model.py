@@ -78,9 +78,10 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         (before replay); a call without any target sample keeps all its negatives.
     pos_weight : "balanced", float or None, default="balanced"
         Weight of a target sample in the loss (negatives weigh 1).  ``"balanced"`` uses
-        ``n_negative / n_target`` of the call's data after the ratio is applied; the same weight is
-        used for replayed targets.  Scores then reflect the re-weighted problem: ``predict_proba``
-        is not calibrated to the original class prior.
+        ``n_negative / n_target`` of the call's data after the ratio is applied. Once both classes
+        have been observed together, that weight is retained for later one-class experiences so
+        replayed targets do not lose their positive-class weight. Scores then reflect the
+        re-weighted problem: ``predict_proba`` is not calibrated to the original class prior.
     replay_mem_size : int, default=200
         Total replay memory, split equally between target and non-target samples (the binary form
         of a class-balanced buffer).  Each class keeps a reservoir sample, so every sample trained
