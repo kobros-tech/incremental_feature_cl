@@ -82,6 +82,10 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         have been observed together, that weight is retained for later one-class experiences so
         replayed targets do not lose their positive-class weight. Scores then reflect the
         re-weighted problem: ``predict_proba`` is not calibrated to the original class prior.
+    replay_pos_weight : {"current", "uniform"}, default="current"
+        Positive-class weighting for replay samples. "current" applies the current
+        experience's positive weight to replayed targets; "uniform" gives replayed
+        targets weight 1.0. Current samples retain their configured weighting.
     replay_mem_size : int, default=200
         Total replay memory, split equally between target and non-target samples (the binary form
         of a class-balanced buffer).  Each class keeps a reservoir sample, so every sample trained
@@ -135,6 +139,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         "alpha": [Interval(numbers.Real, 0, None, closed="left")],
         "n_epochs": [Interval(numbers.Integral, 1, None, closed="left")],
         "random_state": ["random_state"],
+        "replay_pos_weight": [StrOptions({"current", "uniform"})],
     }
 
     def __init__(
@@ -150,6 +155,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         alpha=0.0,
         n_epochs=5,
         random_state=None,
+        replay_pos_weight="current",
     ):
         self.new_feature_dim = new_feature_dim
         self.target_to_negatives = target_to_negatives
@@ -162,6 +168,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         self.alpha = alpha
         self.n_epochs = n_epochs
         self.random_state = random_state
+        self.replay_pos_weight = replay_pos_weight
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
@@ -241,6 +248,13 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
             self.expand_features()
         self._train(X, pos, weight, *self._replay_pool())
         self._update_memory(X, pos)
+        self.last_fit_diagnostics_.update(
+            {
+                "memory_negative": len(self._mem[0]),
+                "memory_target": len(self._mem[1]),
+                "memory_total": sum(map(len, self._mem)),
+            }
+        )
         return self
 
     # ------------------------------------------------------------------ #
@@ -250,19 +264,54 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         params = self._params()
         velocity = [np.zeros_like(p) for p in params]
         n, b = len(X), self.batch_size
+        replay_batches = 0
+        replay_drawn = 0
+        replay_target_drawn = 0
+        replay_negative_drawn = 0
+
         for _ in range(self.n_epochs):
             order = self._rng.permutation(n)
             for start in range(0, n, b):
                 idx = order[start : start + b]
                 xb, pb = X[idx], pos[idx]
-                if Xm is not None:  # up to as many replayed samples as current ones
+
+                # Build per-example weights only when class weighting is enabled.
+                batch_weight = None if weight is None else np.full(len(idx), weight, dtype=float)
+
+                if Xm is not None:
                     j = self._rng.choice(len(Xm), min(len(idx), len(Xm)), replace=False)
-                    xb, pb = np.vstack([xb, Xm[j]]), np.concatenate([pb, pm[j]])
-                grads = self._gradients(xb, pb, weight)
+                    replay_batches += 1
+                    replay_drawn += len(j)
+                    replay_target_drawn += int(pm[j].sum())
+                    replay_negative_drawn += int((~pm[j]).sum())
+
+                    xb = np.vstack([xb, Xm[j]])
+                    pb = np.concatenate([pb, pm[j]])
+
+                    if batch_weight is not None:
+                        if self.replay_pos_weight == "uniform":
+                            replay_weight = np.ones(len(j), dtype=float)
+                        else:
+                            replay_weight = np.full(len(j), weight, dtype=float)
+                        batch_weight = np.concatenate([batch_weight, replay_weight])
+
+                grads = self._gradients(xb, pb, batch_weight)
                 for p, v, g in zip(params, velocity, grads):
                     v *= self.momentum
                     v += g
                     p -= self.learning_rate_init * v
+
+        self.last_fit_diagnostics_ = {
+            "positive_weight": None if weight is None else float(weight),
+            "replay_pos_weight": self.replay_pos_weight,
+            "current_samples_after_ratio": len(X),
+            "current_target_after_ratio": int(pos.sum()),
+            "current_negative_after_ratio": int((~pos).sum()),
+            "replay_batches_with_samples": replay_batches,
+            "replay_samples_drawn_total": replay_drawn,
+            "replay_target_drawn_total": replay_target_drawn,
+            "replay_negative_drawn_total": replay_negative_drawn,
+        }
 
     def _params(self) -> list[np.ndarray]:
         """Arrays updated in place, in the order ``_gradients`` returns their gradients."""

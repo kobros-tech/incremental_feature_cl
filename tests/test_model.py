@@ -407,3 +407,139 @@ def test_ratio_that_would_drop_all_negatives_is_rejected():
     pos = np.array([True, True, False, False, False])
     with pytest.raises(ValueError, match="zero negatives"):
         model._select_negatives(pos)
+
+
+@pytest.mark.parametrize(
+    ("replay_pos_weight", "expected_replay_target_weight"),
+    [
+        ("current", 4.0),
+        ("uniform", 1.0),
+    ],
+)
+def test_replay_pos_weight_modes(replay_pos_weight, expected_replay_target_weight):
+    model = Model(
+        new_feature_dim=0,
+        replay_mem_size=0,
+        batch_size=2,
+        n_epochs=1,
+        random_state=0,
+        replay_pos_weight=replay_pos_weight,
+    )
+    X = np.array([[1.0], [-1.0]])
+    pos = np.array([True, False])
+
+    # Initialize the estimator and its optimizer state.
+    model.fit(X, np.array([1, 0]))
+
+    observed = []
+
+    def record_effective_weights(X_batch, pos_batch, weight):
+        effective = np.ones(len(pos_batch)) if weight is None else np.where(pos_batch, weight, 1.0)
+        observed.append((pos_batch.copy(), effective.copy()))
+        return [np.zeros_like(param) for param in model._params()]
+
+    model._gradients = record_effective_weights
+
+    # Current batch: one target and one negative.
+    # Replay batch: one target and one negative.
+    model._train(
+        X,
+        pos,
+        4.0,
+        np.array([[2.0], [-2.0]]),
+        np.array([True, False]),
+    )
+
+    assert len(observed) == 1
+    batch_pos, effective_weights = observed[0]
+
+    # Current target keeps weight 4; current negative stays at 1.
+    np.testing.assert_array_equal(effective_weights[:2], [4.0, 1.0])
+
+    # Replay target uses the selected mode; replay negative stays at 1.
+    replay_pos = batch_pos[2:]
+    replay_weights = effective_weights[2:]
+
+    assert replay_weights[replay_pos].tolist() == [expected_replay_target_weight]
+    np.testing.assert_array_equal(replay_weights[~replay_pos], [1.0])
+
+
+def test_replay_pos_weight_modes_change_gradients():
+    X = np.array([[1.0], [-1.0], [2.0], [-2.0]])
+    pos = np.array([True, False, True, False])
+    replay_X = np.array([[3.0], [-3.0]])
+    replay_pos = np.array([True, False])
+
+    gradients = {}
+
+    for mode in ("current", "uniform"):
+        model = Model(
+            new_feature_dim=0,
+            replay_mem_size=0,
+            batch_size=2,
+            n_epochs=1,
+            random_state=0,
+            replay_pos_weight=mode,
+        )
+        model.fit(X, pos.astype(int))
+        model.coef_[:] = 0.0
+        model.intercept_[:] = 0.0
+
+        # Use identical parameters, current samples, and replay samples.
+        batch_X = np.vstack([X[:2], replay_X])
+        batch_pos = np.concatenate([pos[:2], replay_pos])
+
+        weights = np.array([4.0, 1.0, 4.0 if mode == "current" else 1.0, 1.0])
+        gradients[mode] = model._gradients(batch_X, batch_pos, weights)
+
+    assert any(not np.allclose(a, b) for a, b in zip(gradients["current"], gradients["uniform"]))
+
+
+def test_replay_pos_weight_modes_change_training_update():
+    X = np.array([[1.0], [-1.0]])
+    y = np.array([1, 0])
+    pos = y == 1
+
+    replay_X = np.array([[2.0], [-2.0]])
+    replay_pos = np.array([True, False])
+
+    results = {}
+
+    for mode in ("current", "uniform"):
+        model = Model(
+            new_feature_dim=0,
+            replay_mem_size=0,
+            batch_size=2,
+            n_epochs=1,
+            learning_rate_init=0.1,
+            momentum=0.0,
+            random_state=0,
+            replay_pos_weight=mode,
+        )
+        model.fit(X, y)
+
+        # Start both modes from identical parameters.
+        model.coef_[:] = 0.0
+        model.intercept_[:] = 0.0
+
+        model._train(
+            X,
+            pos,
+            4.0,
+            replay_X,
+            replay_pos,
+        )
+
+        results[mode] = (
+            model.coef_.copy(),
+            model.intercept_.copy(),
+        )
+
+    assert not np.allclose(
+        results["current"][0],
+        results["uniform"][0],
+    )
+    assert not np.allclose(
+        results["current"][1],
+        results["uniform"][1],
+    )
