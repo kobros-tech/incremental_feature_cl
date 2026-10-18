@@ -185,6 +185,21 @@ def test_load_cifar100_from_local_archive(tmp_path):
     np.testing.assert_array_equal(np.sort(y_test), [0, 1])
 
 
+def test_run_experiment_records_and_uses_inference_batch_size():
+    result = run_experiment(
+        dataset="synthetic",
+        target_class=0,
+        n_experiences=3,
+        seed=2,
+        new_feature_dim=2,
+        n_epochs=1,
+        inference_batch_size=7,
+    )
+
+    assert result["inference_batch_size"] == 7
+    assert len(result["history"]) == 3
+
+
 def test_run_target_examples_in_every_experience_by_default():
     result = run_experiment(
         dataset="synthetic",
