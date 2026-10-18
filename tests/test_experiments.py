@@ -332,9 +332,9 @@ def test_run_never_trains_or_stores_validation_or_test_rows(monkeypatch):
     original_partial_fit = IncrementalFeatureMapModel.partial_fit
     original_update = IncrementalFeatureMapModel._update_memory
 
-    def spy_partial_fit(self, X, y, classes=None):
+    def spy_partial_fit(self, X, y, classes=None, **kwargs):
         trained_rows.extend(np.asarray(X).copy())
-        return original_partial_fit(self, X, y, classes=classes)
+        return original_partial_fit(self, X, y, classes=classes, **kwargs)
 
     def spy_update(self, X, pos):
         stored_rows.extend(np.asarray(X).copy())

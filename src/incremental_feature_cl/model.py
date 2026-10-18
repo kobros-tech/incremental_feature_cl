@@ -191,12 +191,19 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         return self._partial_fit(X, y, classes=None, first=True)
 
     @_fit_context(prefer_skip_nested_validation=True)
-    def partial_fit(self, X, y, classes=None):
-        """Train on one experience.  Expands by ``new_feature_dim`` unless it is the first call."""
+    def partial_fit(self, X, y, classes=None, store_in_memory=None):
+        """Train on one experience.  Expands by ``new_feature_dim`` unless it is the first call.
+
+        ``store_in_memory`` is an optional boolean mask over the rows of ``X``.  Rows marked
+        ``False`` are trained on but not offered to the replay memory (for example, repeated
+        copies of samples already stored).  ``None`` offers every row.
+        """
         first = not hasattr(self, "classes_")
         if first:
             self._reset()
-        return self._partial_fit(X, y, classes=classes, first=first)
+        return self._partial_fit(
+            X, y, classes=classes, first=first, store_in_memory=store_in_memory
+        )
 
     def expand_features(self, new_dim: int | None = None) -> int:
         """Append a block of ``new_dim`` features and zeros to ``coef_``; return the new width."""
@@ -224,8 +231,14 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         ):
             self.__dict__.pop(name, None)
 
-    def _partial_fit(self, X, y, classes, first):
+    def _partial_fit(self, X, y, classes, first, store_in_memory=None):
         X, y = validate_data(self, X, y, reset=first, dtype=np.float64)
+        if store_in_memory is None:
+            store = np.ones(len(y), dtype=bool)
+        else:
+            store = np.asarray(store_in_memory, dtype=bool)
+            if store.shape != y.shape:
+                raise ValueError("store_in_memory must be a boolean mask with one entry per row.")
         check_classification_targets(y)
         if first:
             self._rng = check_random_state(self.random_state)
@@ -247,15 +260,19 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
 
         pos = y == self.classes_[1]
         keep = self._select_negatives(pos)
-        X, pos = X[keep], pos[keep]
+        X, pos, store = X[keep], pos[keep], store[keep]
         weight = self._pos_weight(pos)
 
         if not first:
             self.expand_features()
         self._train(X, pos, weight, *self._replay_pool())
-        self._update_memory(X, pos)
+        mem_before = [len(m) for m in self._mem]
+        self._update_memory(X[store], pos[store])
         self.last_fit_diagnostics_.update(
             {
+                "current_not_offered_to_memory": int((~store).sum()),
+                "memory_negative_added": len(self._mem[0]) - mem_before[0],
+                "memory_target_added": len(self._mem[1]) - mem_before[1],
                 "memory_negative": len(self._mem[0]),
                 "memory_target": len(self._mem[1]),
                 "memory_total": sum(map(len, self._mem)),
@@ -420,16 +437,16 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         expanded feature matrix for the entire test set at once.
         """
         check_is_fitted(self, "classes_")
-        X = validate_data(self, X, reset=False, dtype=np.float64)
+        # Accept float32 as-is: converting the whole input to float64 up front would allocate
+        # a full-size copy and defeat ``inference_batch_size``.  Each chunk is converted below.
+        X = validate_data(self, X, reset=False, dtype=(np.float64, np.float32))
         batch_size = self.inference_batch_size
-        if len(X) <= batch_size:
-            return self._features(X) @ self.coef_[0] + self.intercept_[0]
-
         scores = np.empty(len(X), dtype=np.float64)
         for start in range(0, len(X), batch_size):
-            stop = min(start + batch_size, len(X))
-            X_batch = X[start:stop]
-            scores[start:stop] = self._features(X_batch) @ self.coef_[0] + self.intercept_[0]
+            X_batch = np.asarray(X[start : start + batch_size], dtype=np.float64)
+            scores[start : start + batch_size] = (
+                self._features(X_batch) @ self.coef_[0] + self.intercept_[0]
+            )
         return scores
 
     def predict_proba(self, X) -> np.ndarray:

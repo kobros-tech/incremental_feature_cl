@@ -154,3 +154,16 @@ The math reference checks zero-initialised expansion invariance and the explicit
 The tests cover the estimator API, deterministic behaviour, finite-difference gradient checks, zero-initialised expansion, replay, target/negative sampling, and the small experiment pipeline. A gradient check verifies that the implementation's gradients match its implemented loss; it does not establish parity with the previous PyTorch or scikit-learn implementation.
 
 Do not compare results without recording the seed, experience construction, target class, ratio, replay capacity, training settings, and evaluation metric. In particular, zero-initialised expansion guarantees score continuity only at the expansion boundary; subsequent optimisation can still alter old predictions.
+
+## Experiment notes
+
+- `--target-every-experience` re-trains on the target only in experiences *after* its natural
+  arrival. If the target arrives in the last experience the flag has no effect; the runner warns
+  and records `target_reintroduction_effective: false`.
+- Reintroduced target rows are trained on but not stored again: `partial_fit(...,
+  store_in_memory=mask)` keeps repeated copies from crowding the replay reservoir.
+- Each history entry separates current-batch counts (`n_target_natural`, `n_target_injected`,
+  `fit_diagnostics.current_*`) from replay counts (`fit_diagnostics.replay_*`) and memory changes
+  (`memory_*_added`).
+- `decision_function` accepts `float32` input and converts it chunk by chunk, so
+  `inference_batch_size` also bounds input-preparation memory.

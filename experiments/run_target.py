@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -121,6 +122,18 @@ def run_experiment(
         (exp for exp, stream in enumerate(streams) if np.any(y_fit[stream] == target_class)),
         None,
     )
+    # Reintroduction acts only in experiences after the natural arrival; if the target arrives
+    # in the last experience the flag is a no-op and both modes give identical runs.
+    reintroduction_effective = bool(
+        target_every_experience and natural_target_arrival_experience < len(streams) - 1
+    )
+    if target_every_experience and not reintroduction_effective:
+        warnings.warn(
+            f"target_every_experience has no effect: the target arrives in experience "
+            f"{natural_target_arrival_experience} of {len(streams)}, so no later experience "
+            "exists to reintroduce it into. Use a stream with a later experience.",
+            stacklevel=2,
+        )
     first_training_exposure_experience = None
     seen_training_classes = set()
 
@@ -128,6 +141,7 @@ def run_experiment(
         arriving_classes = np.unique(y_fit[stream_indices]).astype(int).tolist()
         indices = stream_indices
         target_added_to_experience = False
+        n_injected = 0
         if (
             target_every_experience
             and experience > natural_target_arrival_experience
@@ -137,6 +151,7 @@ def run_experiment(
             # experiences remain a genuine pre-arrival stream; test data stays held out.
             indices = np.concatenate([stream_indices, target_indices])
             target_added_to_experience = True
+            n_injected = len(target_indices)
         y_current = (y_fit[indices] == target_class).astype(int)
         if hasattr(model, "classes_"):
             before_score_diagnostics = _score_diagnostics(
@@ -154,21 +169,16 @@ def run_experiment(
             intercept_before = None
             memory_before = None
 
-        positive_memory_before = None
-        positive_seen_before = None
-        if target_every_experience and target_memory_initialized:
-            positive_memory_before = model._mem[1].copy()
-            positive_seen_before = model._mem_seen[1]
+        # Injected target rows are repeats of images already stored.  They are trained on, but
+        # not offered to the replay memory, so duplicates cannot crowd the reservoir.  Only
+        # rows beyond the experience's own stream are injected, so mask by position.
+        store_in_memory = np.ones(len(indices), dtype=bool)
+        if target_memory_initialized and n_injected:
+            store_in_memory[len(stream_indices) :] = False
 
-        model.partial_fit(X_fit[indices], y_current, classes=np.array([0, 1]))
-
-        if positive_memory_before is not None:
-            # Repeated training exposure must not make duplicate copies of the same target
-            # images dominate the reservoir; keep the positive reservoir from first exposure.
-            model._mem[1] = positive_memory_before
-            model._mem_seen[1] = positive_seen_before
-            model.last_fit_diagnostics_["memory_target"] = len(model._mem[1])
-            model.last_fit_diagnostics_["memory_total"] = sum(map(len, model._mem))
+        model.partial_fit(
+            X_fit[indices], y_current, classes=np.array([0, 1]), store_in_memory=store_in_memory
+        )
 
         if int(y_current.sum()):
             target_memory_initialized = True
@@ -301,6 +311,8 @@ def run_experiment(
                 "n_train": len(indices),
                 "n_validation": len(y_validation),
                 "n_target_train": int(y_current.sum()),
+                "n_target_injected": int(n_injected),
+                "n_target_natural": int(y_current.sum()) - int(n_injected),
                 "n_negative_train": int((y_current == 0).sum()),
                 "feature_dim": int(model.feature_dim_),
                 "replay_mem_size": int(replay_mem_size),
@@ -359,6 +371,7 @@ def run_experiment(
         "replay_pos_weight": replay_pos_weight,
         "inference_batch_size": int(inference_batch_size),
         "target_every_experience": bool(target_every_experience),
+        "target_reintroduction_effective": reintroduction_effective,
         "train_blocks": bool(train_blocks),
         "history": history,
         "final_target_recall_forgetting": history[-1]["target_recall_forgetting"],

@@ -618,3 +618,34 @@ def test_target_to_negatives_reports_actual_post_sampling_counts():
     assert diagnostics["current_target_after_ratio"] == 10
     assert diagnostics["current_negative_after_ratio"] == 50
     assert diagnostics["current_samples_after_ratio"] == 60
+
+
+def test_decision_function_float32_matches_float64_without_full_copy():
+    import tracemalloc
+
+    rng = np.random.RandomState(0)
+    X = rng.rand(120, 64)
+    y = (rng.rand(120) > 0.5).astype(int)
+    model = Model(new_feature_dim=4, n_epochs=1, inference_batch_size=16, random_state=0).fit(X, y)
+    X32 = rng.rand(3000, 64).astype(np.float32)
+    tracemalloc.start()
+    scores = model.decision_function(X32)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 0.5 * X32.size * 8  # well below a full float64 copy of the input
+    np.testing.assert_allclose(scores, model.decision_function(X32.astype(np.float64)), rtol=1e-5)
+
+
+def test_store_in_memory_mask_trains_but_does_not_store():
+    rng = np.random.RandomState(1)
+    X = rng.rand(40, 5)
+    y = np.array([0, 1] * 20)
+    model = Model(n_epochs=1, replay_mem_size=100, random_state=0)
+    mask = np.arange(40) < 10
+    model.partial_fit(X, y, classes=[0, 1], store_in_memory=mask)
+    d = model.last_fit_diagnostics_
+    assert d["current_samples_after_ratio"] == 40
+    assert d["current_not_offered_to_memory"] == 30
+    assert d["memory_total"] == 10
+    with pytest.raises(ValueError, match="store_in_memory"):
+        Model().partial_fit(X, y, classes=[0, 1], store_in_memory=mask[:5])
