@@ -19,7 +19,7 @@ For plots, install the optional experiment dependencies:
 pip install -e ".[experiments]"
 ```
 
-Runtime dependencies are NumPy, SciPy, and scikit-learn. PyTorch and Avalanche are not package dependencies. The digits and synthetic experiments need no downloads. For CIFAR-100, `--dataset cifar100` downloads the official archive on first use, verifies its checksum, and caches it under `data/`; `--dataset /path/to/cifar-100-python` uses an already-extracted official Python dataset directory instead. In either case, it samples up to 100 training and 20 test images per class for a reproducible lightweight run.
+Runtime dependencies are NumPy, SciPy, and scikit-learn. PyTorch and Avalanche are not package dependencies. The digits and synthetic experiments need no downloads. For CIFAR-100, `--dataset cifar100` downloads the official archive on first use, verifies its checksum, and caches it under `data/`; `--dataset /path/to/cifar-100-python` uses an already-extracted official Python dataset directory, and `--dataset /path/to/cifar-100-python.tar.gz` uses a local tar archive. The archive must contain `cifar-100-python/train` and `cifar-100-python/test`. In each case, it samples up to 100 training and 20 test images per class for a reproducible lightweight run.
 
 ## Use as a binary estimator or with OneVsRestClassifier
 
@@ -85,15 +85,19 @@ python -m experiments.run_target \
 
 ### CIFAR-100 target-vs-rest stream
 
-`--dataset` is either a name (`digits`, `synthetic`, `cifar100`) or the path of an extracted CIFAR-100 directory. The directory can itself contain `train` and `test`, or contain a `cifar-100-python/` subdirectory with those files; a path implies `cifar100`, so there is no separate data-directory flag.
+`--dataset` accepts a name (`digits`, `synthetic`, `cifar100`), the path of an extracted CIFAR-100 directory, or a local CIFAR-100 tar archive. An extracted directory can itself contain `train` and `test`, or contain a `cifar-100-python/` subdirectory with those files; a path implies `cifar100`, so there is no separate data-directory flag.
 
 ```bash
-# extracted copy on disk
+# extracted copy or local archive on disk
 python -m experiments.run_target \
   --dataset /path/to/cifar-100-python \
   --target-class 17 --n-experiences 20 \
   --new-feature-dim 16 --n-epochs 5 --seed 1 \
   --output results/cifar100_target.json
+
+python -m experiments.run_target \
+  --dataset /data/cifar-100-python.tar.gz \
+  --target-class 17 --n-experiences 20
 
 # or the checksum-verified download/cache
 python -m experiments.run_target --dataset cifar100 --target-class 17 --n-experiences 20
@@ -101,7 +105,7 @@ python -m experiments.run_target --dataset cifar100 --target-class 17 --n-experi
 
 This deliberately uses a deterministic subset of flattened raw pixels, not a learned image backbone. Treat it as an exploratory binary baseline; it is not directly comparable to the earlier PyTorch/Avalanche experiments that used a different model and training pipeline.
 
-Each experience introduces a disjoint group of classes. At every experience, the script evaluates target recall, negative specificity, balanced accuracy, and ROC AUC on the same held-out test set. That makes the trajectory inspectable, but these small datasets are smoke tests—not evidence of performance on CIFAR-100 or a substitute for a multi-seed benchmark.
+The underlying class stream introduces a disjoint group of classes at each experience. By default, the experiment also includes the target-class training examples in every experience (`--target-every-experience`), matching a target-versus-rest task in which positive examples remain available while new negative classes arrive. The target examples are reused from the training split only; held-out test data is never added to training. Their replay-memory reservoir is retained from first exposure rather than repeatedly inserting duplicate copies of the same images. Use `--no-target-every-experience` for the stricter setting where the target class appears only in its original class group and later experiences can contain only negatives. The output distinguishes `classes_arriving`, `classes_in_training_batch`, `natural_target_arrival_experience`, and `first_training_exposure_experience`; repeated target exposure means these are not necessarily the same experience. These modes answer different continual-learning questions and must not be compared without noting the mode. The script reserves a stratified validation subset from the training split (20%, with at least one validation example per class). At each experience, threshold calibration uses only validation examples whose original class labels have already been observed in the training stream through that experience; validation labels from future classes are excluded. This cumulative seen-class scope lets strict class-once mode calibrate after the target has arrived, using target and previously seen negative classes, without requiring target samples in every later training batch. In strict class-once mode, no threshold is reported before the target has arrived, and calibration waits until the permitted validation subset contains both target and negative examples. The `threshold_calibration` record recalibrates at each experience when valid; the `fixed_threshold_calibration` record freezes the first valid threshold and records its exact `calibration_experience` and `validation_classes`. Those calibration metrics use validation data only; full held-out test metrics are for evaluation only and never select thresholds. The output also reports metrics at threshold zero and ROC AUC on the full held-out test set. Threshold ties are resolved by choosing the cutoff closest to zero, then the smaller cutoff. Read all operating points alongside ROC AUC: if AUC stays stable while fixed-threshold recall/specificity shift, scores are drifting relative to the frozen cutoff; if AUC falls, ranking/separation is degrading. These small datasets are smoke tests—not evidence of performance on CIFAR-100 or a substitute for a multi-seed benchmark.
 
 ### Compare target:negative ratios across seeds
 
@@ -127,11 +131,11 @@ python -m experiments.plot_results \
   --results results/replay_comparison.json --output-dir results/replay_plots
 ```
 
-The run history reports two target-recall diagnostics. `target_recall_forgetting` is the drop from the **best** recall seen since the target arrived; the maximum over a noisy series is biased upward, so a single lucky spike inflates it. `target_recall_change_since_arrival` compares with the recall measured when the target first arrived and is the safer number; read it together with `roc_auc`. If AUC is steady while recall and specificity move in opposite directions, the zero threshold is drifting along a stable ranking; that is not loss of target knowledge. Both are one-target diagnostics, not the conventional average forgetting across a multiclass benchmark. With 20 test images per class, one recall reading has a granularity of 0.05.
+The run history reports target-recall diagnostics at threshold zero. `target_recall_forgetting` is the drop from the **best** recall seen since the target was first included in training; the maximum over a noisy series is biased upward, so a single lucky spike inflates it. `target_recall_change_since_arrival` compares with recall at the first training exposure (also reported as `target_recall_at_first_training_exposure`). The recall at the natural class-stream arrival is reported separately as `target_recall_at_natural_class_arrival`; these differ when `--target-every-experience` is enabled. Read them together with `roc_auc`. If AUC is steady while recall and specificity move in opposite directions, the zero threshold is drifting along a stable ranking; that is not loss of target knowledge. Both are one-target diagnostics, not the conventional average forgetting across a multiclass benchmark. With 20 test images per class, one recall reading has a granularity of 0.05.
 
 `--replay-pos-weight current` (the default) reuses the retained positive weight for replayed targets; `uniform` gives them weight 1. On a synthetic raw-pixel stand-in it raised balanced accuracy over `uniform` by moving the operating point (higher recall, lower specificity) without changing ROC AUC, and it did not reduce the recall swing across experiences.
 
-**Replay memory size with scarce targets.** The buffer is split evenly between the two labels, but a label can only fill its half if enough samples have arrived. With one target class seen once (100 images) a memory of 1000 holds 100 targets and 500 negatives, and on the synthetic stand-in that lowered balanced accuracy by 0.048 ± 0.006 compared with a memory of 200. Check `last_fit_diagnostics_["memory_target"]` against `["memory_negative"]` when changing `replay_mem_size`.
+**Replay memory size with scarce targets.** The buffer is split evenly between the two labels, but a label can only fill its half if enough unique samples have arrived. With 100 target images in the loaded training subset, reserving 20% for validation leaves 80 unique target fitting images. A memory of 1000 can therefore hold 80 targets and 500 negatives even when target examples are included in every experience; the experiment runner does not repeatedly insert copies of those same target images into the positive reservoir. On the synthetic stand-in, that configuration lowered balanced accuracy by 0.048 ± 0.006 compared with a memory of 200. Check `last_fit_diagnostics_["memory_target"]` against `["memory_negative"]` when changing `replay_mem_size`.
 
 **Step size and input scale.** `learning_rate_init=0.01` is plain SGD, so it interacts with the squared input norm. Flattened 32x32x3 pixels have `||x||^2` of about 850 in [0, 1] and about 3072 once standardised per pixel; on the synthetic stand-in, standardising at 0.01 was worse than raw pixels, and a smaller step (for example 0.001) was needed for the larger norm. Treat `learning_rate_init` and the feature scale as one setting.
 

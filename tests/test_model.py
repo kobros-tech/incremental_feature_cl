@@ -543,3 +543,34 @@ def test_replay_pos_weight_modes_change_training_update():
         results["current"][1],
         results["uniform"][1],
     )
+
+
+def test_replay_memory_copies_rows_instead_of_retaining_input_views():
+    model = Model(replay_mem_size=4, random_state=0)
+    X0 = np.array([[1.0], [2.0], [3.0], [4.0]])
+    y0 = np.array([0, 0, 1, 1])
+    model.partial_fit(X0, y0, classes=[0, 1])
+
+    X1 = np.array([[11.0], [12.0], [13.0], [14.0]])
+    y1 = np.array([0, 0, 1, 1])
+    model._update_memory(X1, y1.astype(bool))
+
+    for memory in model._mem:
+        assert all(not np.shares_memory(row, X0) for row in memory)
+        assert all(not np.shares_memory(row, X1) for row in memory)
+
+    saved = [[row.copy() for row in memory] for memory in model._mem]
+    X0[:] = -100.0
+    X1[:] = -200.0
+    for actual, expected in zip(model._mem, saved):
+        for actual_row, expected_row in zip(actual, expected):
+            np.testing.assert_array_equal(actual_row, expected_row)
+
+
+def test_predict_treats_zero_score_as_positive():
+    model = Model(new_feature_dim=0, random_state=0).fit(
+        np.array([[-1.0], [1.0]]), np.array([0, 1])
+    )
+    model.coef_[:] = 0.0
+    model.intercept_[:] = 0.0
+    np.testing.assert_array_equal(model.predict(np.array([[-2.0], [0.0], [2.0]])), [1, 1, 1])

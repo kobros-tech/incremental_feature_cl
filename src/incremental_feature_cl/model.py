@@ -389,7 +389,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         for k, rows in enumerate((X[~pos], X[pos])):
             mem, seen = self._mem[k], self._mem_seen[k]
             free = max(0, cap - len(mem))
-            mem.extend(rows[:free])
+            mem.extend(row.copy() for row in rows[:free])
             seen += min(free, len(rows))
             rest = rows[free:]
             if len(rest):
@@ -397,7 +397,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
                     int
                 )
                 for i in np.flatnonzero(j < cap):
-                    mem[j[i]] = rest[i]
+                    mem[j[i]] = rest[i].copy()
                 seen += len(rest)
             self._mem_seen[k] = seen
 
@@ -419,4 +419,4 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
 
     def predict(self, X) -> np.ndarray:
         check_is_fitted(self, "classes_")
-        return self.classes_[(self.decision_function(X) > 0).astype(int)]
+        return self.classes_[(self.decision_function(X) >= 0).astype(int)]

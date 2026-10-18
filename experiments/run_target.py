@@ -9,9 +9,10 @@ import json
 from pathlib import Path
 
 import numpy as np
+from sklearn.model_selection import train_test_split
 
 from experiments.data import DATASETS, class_incremental_indices, load_dataset, resolve_dataset
-from experiments.metrics import target_metrics
+from experiments.metrics import select_balanced_accuracy_threshold, target_metrics
 from incremental_feature_cl import IncrementalFeatureMapModel
 
 
@@ -60,15 +61,34 @@ def run_experiment(
     target_to_negatives: float | None = None,
     train_blocks: bool = True,
     replay_pos_weight: str = "current",
+    target_every_experience: bool = True,
 ) -> dict:
     if n_experiences < 1:
         raise ValueError("n_experiences must be at least 1.")
 
     name, data_dir = resolve_dataset(dataset)
     X_train, X_test, y_train, y_test = load_dataset(dataset, seed)
-    if target_class not in np.unique(y_train):
+    classes = np.unique(y_train)
+    # Reserve validation data from the training split only. Keep at least one fitting
+    # example per class, including for the tiny fixture datasets used by the tests.
+    n_validation = max(len(classes), int(np.ceil(0.2 * len(y_train))))
+    if n_validation > len(y_train) - len(classes):
+        raise ValueError(
+            "The training split is too small to reserve validation examples while "
+            "keeping at least one fitting example per class."
+        )
+    fit_indices, validation_indices = train_test_split(
+        np.arange(len(y_train)),
+        test_size=n_validation,
+        random_state=seed,
+        stratify=y_train,
+    )
+    X_fit, y_fit = X_train[fit_indices], y_train[fit_indices]
+    X_validation, y_validation = X_train[validation_indices], y_train[validation_indices]
+    if target_class not in np.unique(y_fit):
         raise ValueError(f"target_class={target_class} is absent from the training split.")
 
+    y_validation_binary = y_validation == target_class
     y_test_binary = y_test == target_class
     if not np.any(y_test_binary) or not np.any(~y_test_binary):
         raise ValueError("The test split must contain both target and negative examples.")
@@ -86,10 +106,29 @@ def run_experiment(
     target_seen = False
     best_target_recall = None
     recall_at_arrival = None
-    streams = class_incremental_indices(y_train, n_experiences)
+    recall_at_natural_arrival = None
+    streams = class_incremental_indices(y_fit, n_experiences)
+    target_indices = np.flatnonzero(y_fit == target_class)
+    target_memory_initialized = False
+    fixed_threshold = None
+    fixed_threshold_validation_metrics = None
+    fixed_threshold_calibration_experience = None
+    fixed_threshold_validation_classes = None
+    natural_target_arrival_experience = next(
+        (exp for exp, stream in enumerate(streams) if np.any(y_fit[stream] == target_class)),
+        None,
+    )
+    first_training_exposure_experience = None
+    seen_training_classes = set()
 
-    for experience, indices in enumerate(streams):
-        y_current = (y_train[indices] == target_class).astype(int)
+    for experience, stream_indices in enumerate(streams):
+        arriving_classes = np.unique(y_fit[stream_indices]).astype(int).tolist()
+        indices = stream_indices
+        if target_every_experience and target_class not in arriving_classes:
+            # Keep the target task learnable after its class would otherwise disappear
+            # from the class-incremental stream. Test data remains strictly held out.
+            indices = np.concatenate([stream_indices, target_indices])
+        y_current = (y_fit[indices] == target_class).astype(int)
         if hasattr(model, "classes_"):
             before_score_diagnostics = _score_diagnostics(
                 y_test_binary, model.decision_function(X_test)
@@ -106,9 +145,94 @@ def run_experiment(
             intercept_before = None
             memory_before = None
 
-        model.partial_fit(X_train[indices], y_current, classes=np.array([0, 1]))
+        positive_memory_before = None
+        positive_seen_before = None
+        if target_every_experience and target_memory_initialized:
+            positive_memory_before = model._mem[1].copy()
+            positive_seen_before = model._mem_seen[1]
+
+        model.partial_fit(X_fit[indices], y_current, classes=np.array([0, 1]))
+
+        if positive_memory_before is not None:
+            # Repeated training exposure must not make duplicate copies of the same target
+            # images dominate the reservoir; keep the positive reservoir from first exposure.
+            model._mem[1] = positive_memory_before
+            model._mem_seen[1] = positive_seen_before
+            model.last_fit_diagnostics_["memory_target"] = len(model._mem[1])
+            model.last_fit_diagnostics_["memory_total"] = sum(map(len, model._mem))
+
+        if int(y_current.sum()):
+            target_memory_initialized = True
+
         scores_after = model.decision_function(X_test)
         metrics = target_metrics(y_test_binary, scores_after)
+        training_classes = np.unique(y_fit[indices]).astype(int).tolist()
+        seen_training_classes.update(training_classes)
+        if target_class in training_classes and first_training_exposure_experience is None:
+            first_training_exposure_experience = experience
+
+        # Calibration may use validation examples only from classes observed in training
+        # up to this experience. This excludes future-class labels while allowing strict
+        # class-once runs to calibrate on the target plus previously seen negative classes.
+        calibration_allowed_classes = sorted(seen_training_classes)
+        calibration_mask = np.isin(y_validation, calibration_allowed_classes)
+        y_calibration = y_validation_binary[calibration_mask]
+        calibration_classes = (
+            sorted(np.unique(y_validation[calibration_mask]).astype(int).tolist())
+            if np.any(calibration_mask)
+            else []
+        )
+        validation_scores = (
+            model.decision_function(X_validation[calibration_mask])
+            if np.any(calibration_mask)
+            else np.array([], dtype=float)
+        )
+        validation_threshold = None
+        validation_threshold_metrics = None
+        if (
+            target_class in calibration_allowed_classes
+            and y_calibration.any()
+            and (~y_calibration).any()
+        ):
+            validation_threshold, validation_threshold_metrics = select_balanced_accuracy_threshold(
+                y_calibration, validation_scores
+            )
+
+        if fixed_threshold is None and validation_threshold is not None:
+            # Freeze the first valid, class-arrival-aware validation threshold. If the
+            # target arrives alone and no negative class has arrived, wait for a valid
+            # calibration set rather than using future-class validation examples.
+            fixed_threshold = float(validation_threshold)
+            fixed_threshold_validation_metrics = validation_threshold_metrics
+            fixed_threshold_calibration_experience = experience
+            fixed_threshold_validation_classes = calibration_classes
+
+        threshold_calibration = {
+            "method": "validation_balanced_accuracy_seen_classes",
+            "calibration_experience": (experience if validation_threshold is not None else None),
+            "validation_classes": calibration_classes,
+            "calibration_allowed_classes": calibration_allowed_classes,
+            "n_validation": int(calibration_mask.sum()),
+            "threshold": (None if validation_threshold is None else float(validation_threshold)),
+            "validation": validation_threshold_metrics,
+            "test": (
+                None
+                if validation_threshold is None
+                else target_metrics(y_test_binary, scores_after, threshold=validation_threshold)
+            ),
+        }
+        fixed_threshold_calibration = {
+            "method": "first_valid_seen-class_validation_balanced_accuracy",
+            "calibration_experience": fixed_threshold_calibration_experience,
+            "validation_classes": fixed_threshold_validation_classes,
+            "threshold": fixed_threshold,
+            "validation_at_calibration": fixed_threshold_validation_metrics,
+            "test": (
+                None
+                if fixed_threshold is None
+                else target_metrics(y_test_binary, scores_after, threshold=fixed_threshold)
+            ),
+        }
         after_score_diagnostics = _score_diagnostics(y_test_binary, scores_after)
         if coef_before is None:
             coefficient_change = None
@@ -127,11 +251,12 @@ def run_experiment(
             "negative": len(model._mem[0]),
             "target": len(model._mem[1]),
         }
-        arriving_classes = np.unique(y_train[indices]).astype(int).tolist()
-        target_seen = target_seen or target_class in arriving_classes
+        target_seen = target_seen or target_class in training_classes
         target_recall = metrics["target_recall"]
         if target_seen and recall_at_arrival is None and np.isfinite(target_recall):
             recall_at_arrival = target_recall
+        if experience == natural_target_arrival_experience and np.isfinite(target_recall):
+            recall_at_natural_arrival = target_recall
         change_since_arrival = (
             None if recall_at_arrival is None else float(target_recall - recall_at_arrival)
         )
@@ -145,7 +270,16 @@ def run_experiment(
             {
                 "experience": experience,
                 "classes_arriving": arriving_classes,
+                "classes_in_training_batch": training_classes,
+                "natural_target_arrival_experience": natural_target_arrival_experience,
+                "first_training_exposure_experience": first_training_exposure_experience,
+                "fixed_threshold_calibration_experience": fixed_threshold_calibration_experience,
+                "target_every_experience": bool(target_every_experience),
+                "target_added_to_experience": bool(
+                    target_every_experience and target_class not in arriving_classes
+                ),
                 "n_train": len(indices),
+                "n_validation": len(y_validation),
                 "n_target_train": int(y_current.sum()),
                 "n_negative_train": int((y_current == 0).sum()),
                 "feature_dim": int(model.feature_dim_),
@@ -154,6 +288,8 @@ def run_experiment(
                 "best_target_recall": best_target_recall,
                 "target_recall_forgetting": forgetting,
                 "target_recall_at_arrival": recall_at_arrival,
+                "target_recall_at_first_training_exposure": recall_at_arrival,
+                "target_recall_at_natural_class_arrival": recall_at_natural_arrival,
                 "target_recall_change_since_arrival": change_since_arrival,
                 "scores_before_update": before_score_diagnostics,
                 "scores_after_update": after_score_diagnostics,
@@ -162,14 +298,23 @@ def run_experiment(
                 "memory_before_update": memory_before,
                 "memory_after_update": memory_after,
                 "fit_diagnostics": model.last_fit_diagnostics_,
+                "threshold_calibration": threshold_calibration,
+                "fixed_threshold_calibration": fixed_threshold_calibration,
                 **metrics,
             }
         )
 
     return {
         "dataset": name,
-        "data_dir": None if data_dir is None else str(data_dir),
+        "data_dir": (str(data_dir) if data_dir is not None and data_dir.is_dir() else None),
+        "data_source": None if data_dir is None else str(data_dir),
         "target_class": int(target_class),
+        "validation_size": len(y_validation),
+        "natural_target_arrival_experience": natural_target_arrival_experience,
+        "first_training_exposure_experience": first_training_exposure_experience,
+        "fixed_threshold_calibration_experience": fixed_threshold_calibration_experience,
+        "threshold_calibration_method": "validation_balanced_accuracy_seen_classes_each_experience",
+        "fixed_threshold_calibration_method": "first_valid_seen_class_validation_balanced_accuracy",
         "n_experiences": int(n_experiences),
         "seed": int(seed),
         "new_feature_dim": int(new_feature_dim),
@@ -177,12 +322,15 @@ def run_experiment(
         "replay_mem_size": int(replay_mem_size),
         "target_to_negatives": target_to_negatives,
         "replay_pos_weight": replay_pos_weight,
+        "target_every_experience": bool(target_every_experience),
         "train_blocks": bool(train_blocks),
         "history": history,
         "final_target_recall_forgetting": history[-1]["target_recall_forgetting"],
         "final_target_recall_change_since_arrival": history[-1][
             "target_recall_change_since_arrival"
         ],
+        "target_recall_at_first_training_exposure": recall_at_arrival,
+        "target_recall_at_natural_class_arrival": recall_at_natural_arrival,
     }
 
 
@@ -192,9 +340,8 @@ def main() -> None:
         "--dataset",
         default="digits",
         help=(
-            f"One of {', '.join(DATASETS)}, or the path of an extracted CIFAR-100 directory "
-            "(train/test inside it or inside a cifar-100-python subdirectory). 'cifar100' "
-            "downloads and caches the official archive."
+            f"One of {', '.join(DATASETS)}, an extracted CIFAR-100 directory, or a local "
+            "CIFAR-100 .tar/.tar.gz archive. 'cifar100' downloads and caches the official archive."
         ),
     )
     parser.add_argument("--target-class", type=int, default=5)
@@ -218,6 +365,15 @@ def main() -> None:
             "current experience's weight; 'uniform' uses weight 1.0 for replay."
         ),
     )
+    parser.add_argument(
+        "--target-every-experience",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Include the same training target examples in every experience (default). "
+            "Use --no-target-every-experience for a strict class-once stream."
+        ),
+    )
     parser.add_argument("--fixed-blocks", action="store_true", help="Do not train feature blocks.")
     parser.add_argument("--output", type=Path, default=Path("results/target_run.json"))
     args = parser.parse_args()
@@ -237,6 +393,7 @@ def main() -> None:
         target_to_negatives=args.target_to_negatives,
         train_blocks=not args.fixed_blocks,
         replay_pos_weight=args.replay_pos_weight,
+        target_every_experience=args.target_every_experience,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

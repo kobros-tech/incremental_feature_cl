@@ -31,11 +31,10 @@ def _cifar_files(root: Path) -> tuple[Path, Path] | None:
 
 
 def resolve_dataset(dataset: str | Path) -> tuple[str, Path | None]:
-    """Map ``--dataset`` to ``(name, data_dir)``.
+    """Map ``--dataset`` to ``(name, data_source)``.
 
-    ``dataset`` is a name from ``DATASETS`` or the path of an extracted CIFAR-100 directory
-    (``train``/``test`` inside it or inside a ``cifar-100-python`` subdirectory); a path means
-    ``("cifar100", that directory)``.
+    A path can identify an extracted CIFAR-100 directory or a tar archive containing the official
+    ``cifar-100-python/train`` and ``cifar-100-python/test`` files.
     """
     if str(dataset) in DATASETS:
         return str(dataset), None
@@ -47,9 +46,26 @@ def resolve_dataset(dataset: str | Path) -> tuple[str, Path | None]:
                 "inside that directory or its cifar-100-python subdirectory."
             )
         return "cifar100", root
+    if root.is_file() and (
+        root.name.endswith((".tar.gz", ".tgz", ".tar")) or tarfile.is_tarfile(root)
+    ):
+        if not tarfile.is_tarfile(root):
+            raise ValueError(f"CIFAR-100 archive is not a valid tar file: {root}")
+        try:
+            with tarfile.open(root, "r:*") as archive:
+                names = set(archive.getnames())
+        except tarfile.TarError as error:
+            raise ValueError(f"Could not read CIFAR-100 archive {root}: {error}") from error
+        required = {"cifar-100-python/train", "cifar-100-python/test"}
+        if not required.issubset(names):
+            raise ValueError(
+                f"CIFAR-100 archive {root} must contain "
+                "cifar-100-python/train and cifar-100-python/test."
+            )
+        return "cifar100", root
     raise ValueError(
-        f"Unsupported dataset {str(dataset)!r}; use one of {', '.join(DATASETS)} or the path "
-        "of an extracted CIFAR-100 directory."
+        f"Unsupported dataset {str(dataset)!r}; use one of {', '.join(DATASETS)}, "
+        "the path of an extracted CIFAR-100 directory, or a CIFAR-100 tar archive."
     )
 
 
@@ -84,24 +100,32 @@ def _cifar100_archive() -> Path:
     return archive_path
 
 
-def _load_cifar100(seed: int, data_dir: Path | None = None):
+def _load_cifar100(seed: int, data_source: Path | None = None):
     """A reproducible CIFAR-100 subset (100 train / 20 test images per class), pixels in [0, 1]."""
-    if data_dir is not None:
-        train_path, test_path = _cifar_files(data_dir)
+    if data_source is not None and data_source.is_dir():
+        files = _cifar_files(data_source)
+        if files is None:
+            raise FileNotFoundError(f"No CIFAR-100 train/test files found under {data_source}.")
+        train_path, test_path = files
         with train_path.open("rb") as file:
             X_train, y_train = _read_cifar_batch(file, train_path)
         with test_path.open("rb") as file:
             X_test, y_test = _read_cifar_batch(file, test_path)
     else:
-        with tarfile.open(_cifar100_archive(), "r:gz") as archive:
-            members = [
-                archive.extractfile(f"cifar-100-python/{name}") for name in ("train", "test")
-            ]
-            if any(member is None for member in members):
-                raise ValueError("CIFAR-100 archive is missing its train or test data.")
-            (X_train, y_train), (X_test, y_test) = (
-                _read_cifar_batch(member, name) for member, name in zip(members, ("train", "test"))
-            )
+        archive_path = data_source if data_source is not None else _cifar100_archive()
+        try:
+            with tarfile.open(archive_path, "r:*") as archive:
+                members = [
+                    archive.extractfile(f"cifar-100-python/{name}") for name in ("train", "test")
+                ]
+                if any(member is None for member in members):
+                    raise ValueError("CIFAR-100 archive is missing its train or test data.")
+                (X_train, y_train), (X_test, y_test) = (
+                    _read_cifar_batch(member, name)
+                    for member, name in zip(members, ("train", "test"))
+                )
+        except tarfile.TarError as error:
+            raise ValueError(f"Could not read CIFAR-100 archive {archive_path}: {error}") from error
 
     rng = np.random.RandomState(seed)
 
@@ -123,7 +147,7 @@ def _load_cifar100(seed: int, data_dir: Path | None = None):
 
 
 def load_dataset(dataset: str | Path, seed: int = 0):
-    """Return train/test arrays for a name from ``DATASETS`` or an extracted CIFAR-100 directory."""
+    """Return train/test arrays for a named dataset, extracted CIFAR-100 directory, or archive."""
     name, data_dir = resolve_dataset(dataset)
     if name == "cifar100":
         return _load_cifar100(seed, data_dir)
