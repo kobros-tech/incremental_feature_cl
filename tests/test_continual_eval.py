@@ -92,10 +92,60 @@ def test_explicit_per_model_memory_overrides_the_fraction():
     assert r["summary"]["replay_memory_rows"] <= 100
 
 
-def test_matched_joint_uses_same_expansion_schedule_and_all_rows():
-    r = ce.run_stream("digits", "joint_matched", seed=0, n_epochs=1, n_experiences=3)
-    assert r["summary"]["replay_memory_fraction_of_train"] == 1.0
-    assert r["summary"]["recall_forgetting"] == 0.0
+def test_offline_methods_report_only_final_metrics_not_arrival_or_incremental():
+    for method in ("joint", "joint_matched"):
+        r = ce.run_stream("digits", method, seed=0, n_epochs=1, n_experiences=3)
+        assert r["offline"] is True
+        assert len(r["metrics"]) == 1  # a single final evaluation, nothing copied per experience
+        s = r["summary"]
+        assert np.isfinite(s["final_recall"]) and np.isfinite(s["final_balanced_accuracy"])
+        for key in (
+            "recall_at_arrival", "accuracy_at_arrival", "auc_at_arrival",
+            "average_incremental_recall", "average_incremental_accuracy",
+            "recall_forgetting", "accuracy_forgetting", "recall_backward_transfer",
+            "balanced_accuracy_at_arrival",
+        ):  # fmt: skip
+            assert np.isnan(s[key]), key
+        assert s["replay_memory_fraction_of_train"] == 1.0
+    stream = ce.run_stream("digits", "naive", seed=0, n_epochs=1, n_experiences=3)
+    assert stream["offline"] is False and len(stream["metrics"]) == 3
+
+
+@pytest.mark.parametrize("n_experiences", [3, 4, 5])
+@pytest.mark.parametrize("n_epochs", [1, 2, 5])
+def test_every_method_gets_the_same_current_sample_training_budget(n_epochs, n_experiences):
+    runs = {
+        m: ce.run_stream("digits", m, seed=1, n_epochs=n_epochs, n_experiences=n_experiences)
+        for m in ce.METHODS
+    }
+    n_rows = runs["naive"]["n_train_rows"]
+    for m, r in runs.items():  # each row is presented n_epochs times in total, whatever the split
+        assert r["summary"]["train_presentations_current"] == n_epochs * n_rows, m
+    assert runs["joint_matched"]["summary"]["train_presentations_replay"] == 0
+    assert runs["naive"]["summary"]["train_presentations_replay"] == 0
+    # replay is the only method with extra (replayed) presentations, and they are reported
+    assert runs["replay"]["summary"]["train_presentations_replay"] > 0
+
+
+def test_matched_joint_has_the_same_expansion_schedule_as_the_stream(monkeypatch):
+    from incremental_feature_cl import IncrementalFeatureMapModel as Model
+
+    widths = {}
+    original = Model.expand_features
+
+    def spy(self, new_dim=None):
+        out = original(self, new_dim)
+        widths.setdefault(self.__class__, []).append(out)
+        return out
+
+    counts = {}
+    for method in ("naive", "joint_matched"):
+        widths.clear()
+        monkeypatch.setattr(Model, "expand_features", spy)
+        ce.run_stream("digits", method, seed=0, n_epochs=1, n_experiences=4, new_feature_dim=3)
+        counts[method] = sorted(set(widths[Model]))
+    # 3 expansions after the first stage: input width 64 + 3, 6, 9 appended features
+    assert counts["naive"] == counts["joint_matched"] == [67, 70, 73]
 
 
 def test_verdict_fails_when_replay_stores_the_whole_training_set():

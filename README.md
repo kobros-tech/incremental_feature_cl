@@ -176,8 +176,21 @@ class arrives once, class order shuffled per seed) for four methods on identical
 - `naive`: no replay.
 - `replay`: the package default.
 - `joint`: one offline fit on all data, no feature expansion.
-- `joint_matched`: offline training on all data with the same expansion schedule and number of
-  passes as the stream, so model capacity is matched.
+- `joint_matched`: offline, class-mixed training with the same expansion schedule and the same
+  total training exposure as the stream: the rows are split at random into one stage per
+  experience, so every row is presented `n_epochs` times in total (any remainder is handled by
+  `np.array_split`). Only the class-incremental ordering differs.
+
+The two offline methods are trained on all classes at once, so they have no arrival order: they
+report final metrics only, and values defined by arrival (at arrival, incremental, forgetting,
+backward transfer) are shown as `n/a`. In the plots they appear as horizontal reference lines.
+
+**Training budget.** Each method's training exposure is reported per class model: the current
+samples presented to the optimiser (equal for all four methods, `n_epochs` x training rows) and,
+for `replay`, the extra replayed samples (about 60% more on the datasets below). Replay therefore
+takes more gradient steps than `naive`. As a control, `naive` with 8 or 10 epochs instead of 5
+did not improve (final recall 0.57 and 0.56 on `digits`, 0.33 and 0.32 on `synthetic`, against
+0.56 and 0.36 at 5 epochs), so the replay advantage is not explained by extra optimisation.
 
 After each experience it scores every class seen so far and reports, per class, **recall**,
 **specificity**, **accuracy** (arg-max over seen classes) and **AUC**, summarised as final value,
@@ -229,16 +242,18 @@ that have not arrived yet are never scored. Results of the command above (full J
 
 | metric | naive | replay | joint | joint_matched |
 | --- | --- | --- | --- | --- |
-| final recall | 0.557 ± 0.058 | 0.935 ± 0.009 | 0.981 ± 0.003 | 0.973 ± 0.001 |
-| final specificity | 0.955 ± 0.007 | 0.972 ± 0.005 | 0.960 ± 0.003 | 0.992 ± 0.001 |
-| final accuracy | 0.561 ± 0.033 | 0.914 ± 0.010 | 0.956 ± 0.009 | 0.974 ± 0.008 |
-| final AUC | 0.893 ± 0.014 | 0.989 ± 0.001 | 0.995 ± 0.001 | 0.998 ± 0.000 |
-| recall at arrival | 0.983 ± 0.004 | 0.974 ± 0.007 | 0.981 ± 0.003 | 0.973 ± 0.001 |
-| recall forgetting | 0.533 ± 0.071 | 0.051 ± 0.008 | 0.000 ± 0.000 | 0.000 ± 0.000 |
-| recall backward transfer | -0.533 ± 0.071 | -0.049 ± 0.009 | 0.000 ± 0.000 | 0.000 ± 0.000 |
-| accuracy forgetting | 0.531 ± 0.039 | 0.083 ± 0.012 | 0.000 ± 0.000 | 0.000 ± 0.000 |
-| avg incremental recall | 0.798 ± 0.025 | 0.960 ± 0.017 | 0.983 ± 0.011 | 0.973 ± 0.015 |
-| avg incremental accuracy | 0.767 ± 0.039 | 0.948 ± 0.020 | 0.957 ± 0.020 | 0.974 ± 0.010 |
+| final recall | 0.557 ± 0.058 | 0.935 ± 0.009 | 0.981 ± 0.003 | 0.970 ± 0.005 |
+| final specificity | 0.955 ± 0.007 | 0.972 ± 0.005 | 0.960 ± 0.003 | 0.975 ± 0.002 |
+| final accuracy | 0.561 ± 0.033 | 0.914 ± 0.010 | 0.956 ± 0.009 | 0.949 ± 0.007 |
+| final AUC | 0.893 ± 0.014 | 0.989 ± 0.001 | 0.995 ± 0.001 | 0.995 ± 0.001 |
+| recall at arrival | 0.983 ± 0.004 | 0.974 ± 0.007 | n/a | n/a |
+| recall forgetting | 0.533 ± 0.071 | 0.051 ± 0.008 | n/a | n/a |
+| recall backward transfer | -0.533 ± 0.071 | -0.049 ± 0.009 | n/a | n/a |
+| accuracy forgetting | 0.531 ± 0.039 | 0.083 ± 0.012 | n/a | n/a |
+| avg incremental recall | 0.798 ± 0.025 | 0.960 ± 0.017 | n/a | n/a |
+| avg incremental accuracy | 0.767 ± 0.039 | 0.948 ± 0.020 | n/a | n/a |
+| current-sample presentations / class model | 6735.000 ± 0.000 | 6735.000 ± 0.000 | 6735.000 ± 0.000 | 6735.000 ± 0.000 |
+| replayed-sample presentations / class model | 0.000 ± 0.000 | 4110.600 ± 17.228 | 0.000 ± 0.000 | 0.000 ± 0.000 |
 | rows retained (all class models) | 0.000 ± 0.000 | 320.000 ± 0.000 | 1347.000 ± 0.000 | 1347.000 ± 0.000 |
 | fraction of training set retained | 0.000 ± 0.000 | 0.238 ± 0.000 | 1.000 ± 0.000 | 1.000 ± 0.000 |
 
@@ -252,7 +267,7 @@ that have not arrived yet are never scored. Results of the command above (full J
 | info_recall_at_arrival (not gating) | -0.009 | [-0.014, -0.004] | yes |
 | info_auc_at_arrival (not gating) | +0.006 | [+0.004, +0.008] | yes |
 | replay_stores_less_than_the_training_set | +0.238 | [+0.238, +0.238] | yes |
-| info_gap_to_capacity_matched_joint (not gating) | +0.029 | [+0.024, +0.034] | yes |
+| info_gap_to_capacity_matched_joint (not gating) | +0.020 | [+0.014, +0.025] | yes |
 | within_margin_of_joint_training | +0.017 | [+0.013, +0.022] | yes |
 
 All gating criteria passed: True
@@ -261,16 +276,18 @@ All gating criteria passed: True
 
 | metric | naive | replay | joint | joint_matched |
 | --- | --- | --- | --- | --- |
-| final recall | 0.358 ± 0.056 | 0.756 ± 0.036 | 0.928 ± 0.022 | 0.951 ± 0.011 |
-| final specificity | 0.908 ± 0.007 | 0.927 ± 0.007 | 0.873 ± 0.014 | 0.959 ± 0.007 |
-| final accuracy | 0.375 ± 0.049 | 0.748 ± 0.021 | 0.812 ± 0.028 | 0.924 ± 0.017 |
-| final AUC | 0.872 ± 0.022 | 0.945 ± 0.010 | 0.958 ± 0.010 | 0.988 ± 0.002 |
-| recall at arrival | 0.980 ± 0.007 | 0.932 ± 0.021 | 0.928 ± 0.022 | 0.951 ± 0.011 |
-| recall forgetting | 0.746 ± 0.067 | 0.211 ± 0.034 | 0.000 ± 0.000 | 0.000 ± 0.000 |
-| recall backward transfer | -0.746 ± 0.067 | -0.211 ± 0.034 | 0.000 ± 0.000 | 0.000 ± 0.000 |
-| accuracy forgetting | 0.731 ± 0.057 | 0.235 ± 0.019 | 0.000 ± 0.000 | 0.000 ± 0.000 |
-| avg incremental recall | 0.624 ± 0.027 | 0.844 ± 0.013 | 0.938 ± 0.016 | 0.956 ± 0.011 |
-| avg incremental accuracy | 0.640 ± 0.022 | 0.854 ± 0.012 | 0.820 ± 0.020 | 0.927 ± 0.020 |
+| final recall | 0.358 ± 0.056 | 0.756 ± 0.036 | 0.928 ± 0.022 | 0.904 ± 0.020 |
+| final specificity | 0.908 ± 0.007 | 0.927 ± 0.007 | 0.873 ± 0.014 | 0.899 ± 0.015 |
+| final accuracy | 0.375 ± 0.049 | 0.748 ± 0.021 | 0.812 ± 0.028 | 0.814 ± 0.030 |
+| final AUC | 0.872 ± 0.022 | 0.945 ± 0.010 | 0.958 ± 0.010 | 0.959 ± 0.012 |
+| recall at arrival | 0.980 ± 0.007 | 0.932 ± 0.021 | n/a | n/a |
+| recall forgetting | 0.746 ± 0.067 | 0.211 ± 0.034 | n/a | n/a |
+| recall backward transfer | -0.746 ± 0.067 | -0.211 ± 0.034 | n/a | n/a |
+| accuracy forgetting | 0.731 ± 0.057 | 0.235 ± 0.019 | n/a | n/a |
+| avg incremental recall | 0.624 ± 0.027 | 0.844 ± 0.013 | n/a | n/a |
+| avg incremental accuracy | 0.640 ± 0.022 | 0.854 ± 0.012 | n/a | n/a |
+| current-sample presentations / class model | 9000.000 ± 0.000 | 9000.000 ± 0.000 | 9000.000 ± 0.000 | 9000.000 ± 0.000 |
+| replayed-sample presentations / class model | 0.000 ± 0.000 | 5998.000 ± 11.511 | 0.000 ± 0.000 | 0.000 ± 0.000 |
 | rows retained (all class models) | 0.000 ± 0.000 | 444.000 ± 0.000 | 1800.000 ± 0.000 | 1800.000 ± 0.000 |
 | fraction of training set retained | 0.000 ± 0.000 | 0.247 ± 0.000 | 1.000 ± 0.000 | 1.000 ± 0.000 |
 
@@ -284,7 +301,7 @@ All gating criteria passed: True
 | info_recall_at_arrival (not gating) | -0.048 | [-0.068, -0.028] | NO |
 | info_auc_at_arrival (not gating) | +0.001 | [-0.002, +0.004] | yes |
 | replay_stores_less_than_the_training_set | +0.247 | [+0.247, +0.247] | yes |
-| info_gap_to_capacity_matched_joint (not gating) | +0.114 | [+0.100, +0.128] | yes |
+| info_gap_to_capacity_matched_joint (not gating) | +0.060 | [+0.041, +0.080] | yes |
 | within_margin_of_joint_training | +0.059 | [+0.045, +0.074] | yes |
 
 All gating criteria passed: True
@@ -294,10 +311,10 @@ How to read these results:
 - Replay retains what naive training loses (recall forgetting 0.05 vs 0.53 on `digits`, 0.21 vs
   0.75 on `synthetic`) without giving up specificity, while keeping about a quarter of the
   training rows.
-- Retention is incomplete on the harder `synthetic` stream: final recall is 0.76 against 0.95 for
-  capacity-matched joint training (the `info_gap_to_capacity_matched_joint` row). Reducing the
-  budget degrades results gradually; on `digits`, 15% retained gave final recall about 0.91 and
-  7% about 0.83.
+- Retention is incomplete on the harder `synthetic` stream: final recall is 0.76 against 0.90 for
+  budget-matched joint training. The remaining gap to `joint_matched` is 0.02 balanced accuracy
+  on `digits` and 0.06 on `synthetic`. Reducing the memory budget degrades results gradually; on
+  `digits`, 15% retained gave final recall about 0.91 and 7% about 0.83.
 - Replay's recall at arrival is below naive's on `synthetic` (about -0.05), but naive reaches
   its higher arrival recall with lower specificity (0.78 vs 0.91). Plasticity is therefore
   gated on balanced accuracy, not raw recall; AUC at arrival is equal for the two methods.

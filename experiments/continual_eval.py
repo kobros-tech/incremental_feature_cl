@@ -15,8 +15,11 @@ matrices indexed ``[experience, class]``:
 
 Four methods are compared on the same data and seeds: ``naive`` (no replay), ``replay`` (the
 package's bounded memory), ``joint`` (one offline fit on all data, no feature expansion) and
-``joint_matched`` (offline training on all data with the same feature-expansion schedule and
-number of passes as the stream, so capacity is matched).  Replay memory is accounted for in
+``joint_matched`` (offline, class-mixed training with the same feature-expansion schedule and the
+same total training exposure as the stream: every row is presented ``n_epochs`` times in total).
+The two offline methods are trained on all classes at once, so they report final metrics only;
+values defined by order of arrival (at arrival, incremental, forgetting) are NaN for them.  The
+training exposure of every method, including replayed samples, is reported alongside.  Replay memory is accounted for in
 total rows across all one-vs-rest models, because each class model keeps its own memory.  The
 verdict compares ``replay`` with ``naive`` using paired differences over seeds and a Student-t
 confidence interval, and reports each criterion separately instead of one opaque pass/fail.
@@ -118,22 +121,30 @@ def run_stream(
     model = _make_model(method, new_feature_dim, n_epochs, replay_mem_size, seed)
 
     metrics: list[dict[int, dict[str, float]]] = []
-    if method in ("joint", "joint_matched"):
-        if method == "joint":
-            model.fit(X_train, y_train)
-        else:  # same expansion schedule and number of passes as the stream, all data each time
-            for _ in range(n_experiences):
-                model.partial_fit(X_train, y_train, classes=classes)
-        full = _evaluate(model, X_test, y_test, [int(c) for c in classes])
-        # The joint model has no stream; report the same numbers after every experience for the
-        # classes seen so far so that it can be read against the incremental methods.
-        for e in range(n_experiences):
-            seen = sorted(c for c, a in arrival.items() if a <= e)
-            metrics.append({c: full[c] for c in seen})
+    offline = method in ("joint", "joint_matched")
+    current_presented = replay_presented = 0.0
+    if method == "joint":
+        model.fit(X_train, y_train)
+        current_presented, replay_presented = _presentations(model, n_epochs)
+        metrics.append(_evaluate(model, X_test, y_test, [int(c) for c in classes]))
+    elif method == "joint_matched":
+        # Same feature-expansion schedule and the same total training exposure as the stream:
+        # every training row is presented n_epochs times in total.  The rows are split at random
+        # into n_experiences class-mixed stages (np.array_split handles any remainder), so the
+        # only difference from the stream is that no stage is class-incremental.
+        for rows in np.array_split(rng.permutation(len(y_train)), n_experiences):
+            model.partial_fit(X_train[rows], y_train[rows], classes=classes)
+            cur, rep = _presentations(model, n_epochs)
+            current_presented += cur
+            replay_presented += rep
+        metrics.append(_evaluate(model, X_test, y_test, [int(c) for c in classes]))
     else:
         for e, group in enumerate(groups):
             rows = np.flatnonzero(np.isin(y_train, group))
             model.partial_fit(X_train[rows], y_train[rows], classes=classes)
+            cur, rep = _presentations(model, n_epochs)
+            current_presented += cur
+            replay_presented += rep
             seen = sorted(c for c, a in arrival.items() if a <= e)
             metrics.append(_evaluate(model, X_test, y_test, seen))
 
@@ -143,38 +154,76 @@ def run_stream(
         stored = 0
     else:  # offline methods need every training row
         stored = len(y_train)
-    summary = summarise(metrics, arrival, n_experiences)
+    summary = summarise(metrics, arrival, n_experiences, offline=offline)
     summary["replay_memory_rows"] = float(stored)
     summary["replay_memory_fraction_of_train"] = float(stored / len(y_train))
+    # Training exposure per class model: samples of the experience's own data presented to the
+    # optimiser, and extra replayed samples.  Both are reported so budgets can be compared.
+    summary["train_presentations_current"] = float(current_presented)
+    summary["train_presentations_replay"] = float(replay_presented)
     return {
         "method": method,
+        "offline": offline,
         "seed": int(seed),
+        "n_epochs": int(n_epochs),
         "replay_mem_size_per_class_model": int(replay_mem_size),
         "n_train_rows": len(y_train),
         "arrival": {str(c): a for c, a in sorted(arrival.items())},
+        # Stream methods: one entry per experience.  Offline methods: a single final entry;
+        # they have no per-experience values, so none are fabricated.
         "metrics": [{str(c): m for c, m in step.items()} for step in metrics],
         "summary": summary,
     }
 
 
-def summarise(metrics, arrival: dict[int, int], n_experiences: int) -> dict[str, float]:
-    """Continual-learning summary of one run from its per-experience, per-class metrics."""
+def _presentations(model, n_epochs: int) -> tuple[float, float]:
+    """Training exposure of the last ``partial_fit``/``fit``, averaged over class models."""
+    ests = model.estimators_
+    cur = np.mean([n_epochs * e.last_fit_diagnostics_["current_samples_after_ratio"] for e in ests])
+    rep = np.mean([e.last_fit_diagnostics_["replay_samples_drawn_total"] for e in ests])
+    return float(cur), float(rep)
+
+
+_SUMMARY_KEYS = [
+    f"{prefix}{key}{suffix}"
+    for key in ("recall", "accuracy", "specificity", "auc")
+    for prefix, suffix in (("final_", ""), ("average_incremental_", ""), ("", "_at_arrival"))
+]
+
+
+def summarise(
+    metrics, arrival: dict[int, int], n_experiences: int, offline: bool = False
+) -> dict[str, float]:
+    """Continual-learning summary of one run from its per-experience, per-class metrics.
+
+    For ``offline`` runs ``metrics`` holds only the final evaluation.  Final values are reported;
+    values defined by the order of arrival (at arrival, incremental, forgetting, backward
+    transfer) do not apply to a model trained on all data at once and are NaN.
+    """
+    nan = float("nan")
     last = n_experiences - 1
-    final = metrics[last]
-    old = [c for c, a in arrival.items() if a < last]  # classes that had time to be forgotten
-    out: dict[str, float] = {}
+    final = metrics[-1] if offline else metrics[last]
+    out: dict[str, float] = {k: nan for k in _SUMMARY_KEYS}
     for key in ("recall", "accuracy", "specificity", "auc"):
         out[f"final_{key}"] = float(np.nanmean([final[c][key] for c in final]))
+    out["final_balanced_accuracy"] = (out["final_recall"] + out["final_specificity"]) / 2
+    out["balanced_accuracy_at_arrival"] = nan
+    for key in ("recall", "accuracy"):
+        out[f"{key}_forgetting"] = out[f"{key}_backward_transfer"] = nan
+    if offline:
+        return out
+
+    for key in ("recall", "accuracy", "specificity", "auc"):
         out[f"average_incremental_{key}"] = float(
             np.nanmean([np.nanmean([m[key] for m in step.values()]) for step in metrics])
         )
         out[f"{key}_at_arrival"] = float(np.nanmean([metrics[arrival[c]][c][key] for c in arrival]))
-    out["final_balanced_accuracy"] = (out["final_recall"] + out["final_specificity"]) / 2
     out["balanced_accuracy_at_arrival"] = (
         out["recall_at_arrival"] + out["specificity_at_arrival"]
     ) / 2
-    for key in ("recall", "accuracy"):
-        if old:
+    old = [c for c, a in arrival.items() if a < last]  # classes that had time to be forgotten
+    if old:
+        for key in ("recall", "accuracy"):
             # Forgetting: best value after arrival (before the final experience) minus final.
             drops = [
                 max(metrics[t][c][key] for t in range(arrival[c], last)) - final[c][key]
@@ -183,9 +232,16 @@ def summarise(metrics, arrival: dict[int, int], n_experiences: int) -> dict[str,
             changes = [final[c][key] - metrics[arrival[c]][c][key] for c in old]
             out[f"{key}_forgetting"] = float(np.nanmean(drops))
             out[f"{key}_backward_transfer"] = float(np.nanmean(changes))
-        else:
-            out[f"{key}_forgetting"] = out[f"{key}_backward_transfer"] = float("nan")
     return out
+
+
+def _mean_std(values: list[float]) -> dict[str, float]:
+    v = np.asarray(values, dtype=float)
+    v = v[~np.isnan(v)]  # all-NaN (not applicable) stays NaN without a warning
+    return {
+        "mean": float(v.mean()) if len(v) else float("nan"),
+        "std": float(v.std(ddof=1)) if len(v) > 1 else float("nan"),
+    }
 
 
 def _paired(a: list[float], b: list[float], confidence: float = 0.95) -> dict[str, float]:
@@ -271,15 +327,7 @@ def run_comparison(
     aggregate = {}
     for m, rs in runs.items():
         keys = rs[0]["summary"].keys()
-        aggregate[m] = {
-            k: {
-                "mean": float(np.nanmean([r["summary"][k] for r in rs])),
-                "std": float(np.nanstd([r["summary"][k] for r in rs], ddof=1))
-                if len(rs) > 1
-                else float("nan"),
-            }
-            for k in keys
-        }
+        aggregate[m] = {k: _mean_std([r["summary"][k] for r in rs]) for k in keys}
     result = {"dataset": str(dataset), "seeds": list(seeds), "settings": kwargs}
     result.update({"runs": runs, "aggregate": aggregate})
     if {"naive", "replay"} <= set(methods):
@@ -299,16 +347,18 @@ def format_report(result: dict) -> str:
         ("accuracy_forgetting", "accuracy forgetting"),
         ("average_incremental_recall", "avg incremental recall"),
         ("average_incremental_accuracy", "avg incremental accuracy"),
+        ("train_presentations_current", "current-sample presentations / class model"),
+        ("train_presentations_replay", "replayed-sample presentations / class model"),
         ("replay_memory_rows", "rows retained (all class models)"),
         ("replay_memory_fraction_of_train", "fraction of training set retained"),
     ]
     methods = list(result["aggregate"])
     lines = ["| metric | " + " | ".join(methods) + " |", "|---|" + "---|" * len(methods)]
     for key, label in rows:
-        cells = [
-            f"{result['aggregate'][m][key]['mean']:.3f} ± {result['aggregate'][m][key]['std']:.3f}"
-            for m in methods
-        ]
+        cells = []
+        for m in methods:
+            v = result["aggregate"][m][key]
+            cells.append("n/a" if np.isnan(v["mean"]) else f"{v['mean']:.3f} ± {v['std']:.3f}")
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     if "verdict" in result:
         lines += ["", "| criterion (replay vs naive, paired) | mean diff | 95% CI | passed |"]

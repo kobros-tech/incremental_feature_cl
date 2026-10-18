@@ -57,9 +57,11 @@ def plot_continual(data: dict, output_dir: Path) -> list[Path]:
         saved.append(path)
         print(f"Saved: {path}")
 
+    stream = [m for m in methods if not runs[m][0].get("offline")]
+    offline = [m for m in methods if runs[m][0].get("offline")]
     for key in ("recall", "accuracy"):
         fig, ax = plt.subplots()
-        for m in methods:
+        for m in stream:
             c = _curve(runs[m], key)
             x = np.arange(c.shape[1])
             ax.plot(x, c.mean(0), marker="o", label=m)
@@ -67,6 +69,13 @@ def plot_continual(data: dict, output_dir: Path) -> list[Path]:
                 ax.fill_between(
                     x, c.mean(0) - c.std(0, ddof=1), c.mean(0) + c.std(0, ddof=1), alpha=0.15
                 )
+        for m in offline:  # trained on all classes at once: only a final value exists
+            ax.axhline(
+                data["aggregate"][m][f"final_{key}"]["mean"],
+                linestyle="--",
+                color="grey" if m == "joint" else "black",
+                label=f"{m} (offline, final value)",
+            )
         ax.set_xlabel("Experience")
         ax.set_ylabel(f"Mean {key} over classes seen so far")
         ax.set_xticks(range(len(x)))
