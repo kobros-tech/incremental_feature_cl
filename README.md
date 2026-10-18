@@ -1,79 +1,144 @@
 # incremental-feature-cl
 
-A scikit-learn **binary** classifier: a linear model over a feature space that can grow, where every new
-feature block starts with **zero** weights, so predictions are unchanged at the moment of expansion.
-Plain NumPy training (minibatch SGD with momentum), no PyTorch.
+A small scikit-learn-compatible **binary** classifier for experiments with incremental feature expansion and replay. The installed package contains the estimator, not dataset loaders, continual-learning orchestration, plotting, or benchmark code.
 
-```text
-Phi_{t+1}(x) = [Phi_t(x), psi_{t+1}(x)]        theta_{t+1} = [theta_t, 0]
-```
-
-Earlier samples are **replayed** from a small built-in memory at every `partial_fit` (on by default,
-`replay_mem_size=0` turns it off). Multiclass problems are handled by scikit-learn's `OneVsRestClassifier`, not by this package.
+The hypothesis under study is narrow: append a feature block while initialising its classifier coefficients to zero. Immediately after expansion, scores are unchanged:
+`Phi_new(x) = [Phi_old(x), psi(x)]` and `theta_new = [theta_old, 0]`.
+This continuity property does **not** guarantee that later training prevents forgetting.
 
 ## Install
 
 ```bash
-pip install -e ".[dev]"   # numpy, scikit-learn (+ pytest, ruff)
+pip install -e ".[dev]"
 pytest
 ```
 
-## Usage
+For plots, install the optional experiment dependencies:
+
+```bash
+pip install -e ".[experiments]"
+```
+
+Runtime dependencies are NumPy, SciPy, and scikit-learn. PyTorch and Avalanche are not package dependencies. The digits and synthetic experiments need no downloads. For CIFAR-100, pass `--data-dir` to use an already-extracted official Python dataset directory; otherwise the experiment downloads the official archive on first use, verifies its checksum, and caches it under `data/`. In either case, it samples up to 100 training and 20 test images per class for a reproducible lightweight run.
+
+## Use as a binary estimator or with OneVsRestClassifier
 
 ```python
 from sklearn.multiclass import OneVsRestClassifier
 from incremental_feature_cl import IncrementalFeatureMapModel
 
-clf = IncrementalFeatureMapModel(new_feature_dim=16, target_to_negatives=0.2, random_state=0)
+# One binary task
+model = IncrementalFeatureMapModel(
+    new_feature_dim=16,
+    replay_mem_size=200,
+    random_state=0,
+)
+model.fit(X, y)
 
-clf.fit(X, y)  # binary: one stage, no expansion
-clf.partial_fit(X_t, y_t, classes=[0, 1])  # one experience: expand, train with replay, remember
-clf.expand_features()  # append a block by hand (decision_function is unchanged)
+# A continual stream: the first call initialises the model;
+# every later partial_fit appends a zero-initialised feature block.
+model = IncrementalFeatureMapModel(new_feature_dim=16, random_state=0)
+model.partial_fit(X_exp0, y_exp0, classes=[0, 1])
+model.partial_fit(X_exp1, y_exp1)
+model.partial_fit(X_exp2, y_exp2)
 
-IncrementalFeatureMapModel(replay_mem_size=0)  # replay off
-
-ovr = OneVsRestClassifier(clf).fit(X, y)  # multiclass
-ovr.partial_fit(X_t, y_t, classes=all_classes)  # incremental multiclass
+# Multiclass routing is supplied by scikit-learn.
+ovr = OneVsRestClassifier(IncrementalFeatureMapModel(new_feature_dim=16))
+ovr.fit(X_multiclass, y_multiclass)
 ```
 
-Scale the features (e.g. `StandardScaler`); pass an external backbone's features in as `X`.
+The model is binary by design. In the binary encoding, `classes_[1]` is the positive class. Scale features before fitting; the optimiser is minibatch SGD on weighted logistic loss.
 
-## Parameters
+## Training and replay semantics
 
-| Name | Default | Meaning |
-| --- | --- | --- |
-| `new_feature_dim` | `0` | Width of the block appended before each `partial_fit` after the first. `0` = fixed feature space. |
-| `target_to_negatives` | `None` | Targets per negative in the call's data: `1.0` = 1:1, `0.2` = 1 target : 5 negatives. Keeps `floor(n_target / ratio)` negatives (without replacement; all if fewer exist). `None` keeps all. Applied **before** replay. |
-| `pos_weight` | `"balanced"` | Loss weight of a target sample: `"balanced"` = `n_negative / n_target` of the call's data (after the ratio), a float, or `None`. Replayed targets get the same weight. |
-| `replay_mem_size` | `200` | Total replay memory, split equally between target and non-target; a reservoir sample per class of everything trained on. Each minibatch of `batch_size` current samples gets `min(batch size, memory)` memory samples without replacement. `0` = replay off, otherwise at least 2. |
-| `train_blocks` | `True` | Train the appended feature blocks. `False` = fixed random features. |
-| `learning_rate_init`, `momentum` | `0.01`, `0.9` | SGD step size and momentum (the momentum buffers restart in every call). |
-| `batch_size` | `32` | Minibatch size of the current data. |
-| `alpha` | `0.0` | L2 penalty (weight decay). |
-| `n_epochs` | `5` | Passes per `fit` / `partial_fit` call. |
-| `random_state` | `None` | Seeds feature blocks, negative subsampling, replay and shuffling. |
+- `fit(X, y)` resets model state and trains one stage without expansion.
+- The first `partial_fit` initialises the model without expansion; each later call appends `new_feature_dim` features before training.
+- `expand_features()` can append a block explicitly. Its classifier coefficients start at zero, so the decision scores must remain unchanged before further training.
+- `replay_mem_size=200` enables a bounded binary replay buffer by default. `replay_mem_size=0` disables replay; values of 1 are rejected because the buffer is split between the two binary labels.
+- `target_to_negatives` applies to the current batch before replay. It is a **target-samples-per-negative** ratio: `0.2` requests one target per five negatives, `1.0` requests a 1:1 ratio, and `None` keeps all negatives. If the requested ratio would discard every available negative, training raises an error rather than silently fitting a positive-only batch.
+- `pos_weight="balanced"` uses the negative-to-positive ratio when both labels occur in the current batch. For a one-label batch it uses 1.0; it does not make the absent class appear in that batch.
 
-The positive class is `classes_[1]`. New weights are always zero-initialised; there is no option for random
-initialisation.
+Replay memory is balanced between the binary target and non-target labels. This is **not equivalent** to a buffer balanced over the original multiclass IDs; comparisons with a multiclass replay baseline must state that distinction.
 
-## Relation to the PyTorch version
+## Research experiments (outside `src/`)
 
-Run on identical synthetic streams (10 seeds), the final balanced accuracy of this package differs from the
-PyTorch package by +0.002 ± 0.003 (replay 200, the original's cumulative stream) and -0.013 ± 0.011 (a stream with
-only new negatives per experience). The mechanisms line up as follows.
+These scripts are deliberately not part of the installed package API.
 
-| Mechanism | PyTorch package | This package |
-| --- | --- | --- |
-| Zero init | `W_new = 0`, `b = 0` | same (`decision_function` is unchanged by `expand_features`) |
-| Feature block | `relu(Linear(x))`, `nn.Linear` default init, trained | same (`train_blocks=False` freezes it) |
-| Expansion schedule | every experience after the first | every `partial_fit` after the first |
-| Ratio | `floor(n_target / ratio)` negatives, before replay | same |
-| Loss | BCE with `pos_weight` from the experience's data | same name and meaning |
-| Optimiser | SGD + momentum, minibatch 32, restarted per experience | same |
-| Replay rate | per minibatch of 32: `min(32, memory)` samples without replacement | same |
-| Replay off | `replay_mem_size=0` | same |
-| Replay memory | class-balanced over the **class ids**, per-class replace | class-balanced over the **two binary classes**, reservoir |
+### Synthetic target-vs-rest stream
 
-The last row is the one difference that cannot be removed: scikit-learn passes a binary `y`, so class ids are not
-known. With K classes the original keeps 1/K targets in memory; this package keeps 1/2. Balanced accuracy is
-similar, but this package trades target recall for old-negative recognition differently.
+```bash
+python -m experiments.run_target \
+  --dataset synthetic --target-class 0 --n-experiences 3 \
+  --new-feature-dim 8 --n-epochs 5 --replay-mem-size 200 \
+  --target-to-negatives 0.2 --seed 1 \
+  --output results/synthetic_target.json
+```
+
+### Digits target-vs-rest stream
+
+```bash
+python -m experiments.run_target \
+  --dataset digits --target-class 5 --n-experiences 5 \
+  --new-feature-dim 8 --n-epochs 5 --seed 1 \
+  --output results/digits_target.json
+```
+
+### CIFAR-100 target-vs-rest stream
+
+Use the extracted directory directly (the directory can itself contain `train` and `test`, or contain a `cifar-100-python/` subdirectory with those files):
+
+```bash
+python -m experiments.run_target \
+  --dataset cifar100 --data-dir /path/to/cifar-100-python \
+  --target-class 17 --n-experiences 20 \
+  --new-feature-dim 16 --n-epochs 5 --seed 1 \
+  --output results/cifar100_target.json
+```
+
+Omit `--data-dir` to use the checksum-verified download/cache instead.
+
+This deliberately uses a deterministic subset of flattened raw pixels, not a learned image backbone. Treat it as an exploratory binary baseline; it is not directly comparable to the earlier PyTorch/Avalanche experiments that used a different model and training pipeline.
+
+Each experience introduces a disjoint group of classes. At every experience, the script evaluates target recall, negative specificity, balanced accuracy, and ROC AUC on the same held-out test set. That makes the trajectory inspectable, but these small datasets are smoke tests—not evidence of performance on CIFAR-100 or a substitute for a multi-seed benchmark.
+
+### Compare target:negative ratios across seeds
+
+```bash
+python -m experiments.compare_ratios \
+  --dataset digits --target-class 5 --n-experiences 5 \
+  --seeds 0 1 2 3 4 --include-all-negatives \
+  --output results/ratio_comparison.json
+
+python -m experiments.plot_results \
+  --results results/ratio_comparison.json --output-dir results/ratio_plots
+```
+
+### Compare replay off versus bounded memory
+
+```bash
+python -m experiments.compare_replay \
+  --dataset digits --target-class 5 --n-experiences 5 \
+  --seeds 0 1 2 3 4 --replay-sizes 0 200 \
+  --output results/replay_comparison.json
+
+python -m experiments.plot_results \
+  --results results/replay_comparison.json --output-dir results/replay_plots
+```
+
+The run history also reports target-recall forgetting: the drop from the best target recall observed after the target class arrives. It is a one-target diagnostic, not the conventional average forgetting across a multiclass benchmark.
+
+### Plot a saved run and verify the mathematical reference
+
+```bash
+python -m experiments.plot_results \
+  --results results/digits_target.json --output-dir results/digits_plots
+python -m experiments.math_reference
+```
+
+The math reference checks zero-initialised expansion invariance and the explicit degree-two polynomial feature identity. Plotting reads saved JSON; it does not retrain the estimator.
+
+## What the experiments do and do not establish
+
+The tests cover the estimator API, deterministic behaviour, finite-difference gradient checks, zero-initialised expansion, replay, target/negative sampling, and the small experiment pipeline. A gradient check verifies that the implementation's gradients match its implemented loss; it does not establish parity with the previous PyTorch or scikit-learn implementation.
+
+Do not compare results without recording the seed, experience construction, target class, ratio, replay capacity, training settings, and evaluation metric. In particular, zero-initialised expansion guarantees score continuity only at the expansion boundary; subsequent optimisation can still alter old predictions.

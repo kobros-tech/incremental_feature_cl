@@ -373,3 +373,35 @@ def test_pickle_round_trip_keeps_expanded_state(binary):
 @parametrize_with_checks([Model(random_state=0)])
 def test_sklearn_estimator_checks(estimator, check):
     check(estimator)
+
+
+# ---------------------------------------------------------------------- #
+# edge cases found in review
+# ---------------------------------------------------------------------- #
+def test_balanced_pos_weight_is_finite_for_single_class_experiences():
+    model = Model(pos_weight="balanced")
+    assert model._pos_weight(np.ones(12, dtype=bool)) == 1.0
+    assert model._pos_weight(np.zeros(12, dtype=bool)) == 1.0
+    assert model._pos_weight(np.array([True, True, False, False, False])) == 1.5
+
+
+def test_first_partial_fit_rejects_labels_outside_declared_classes():
+    X = np.arange(12, dtype=float).reshape(6, 2)
+    y = np.array([0, 0, 1, 1, 2, 2])
+    with pytest.raises(ValueError, match="outside classes_"):
+        Model().partial_fit(X, y, classes=[0, 1])
+
+
+def test_later_partial_fit_rejects_labels_outside_classes(binary):
+    X, y = binary
+    model = Model(random_state=0).partial_fit(X[:20], y[:20], classes=[0, 1])
+    with pytest.raises(ValueError, match="outside classes_"):
+        model.partial_fit(X[20:24], np.array([0, 1, 2, 2]))
+
+
+def test_ratio_that_would_drop_all_negatives_is_rejected():
+    model = Model(target_to_negatives=10.0)
+    model._rng = np.random.RandomState(0)
+    pos = np.array([True, True, False, False, False])
+    with pytest.raises(ValueError, match="zero negatives"):
+        model._select_negatives(pos)

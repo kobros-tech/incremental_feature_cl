@@ -227,7 +227,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
             self.coef_ = np.zeros((1, self.n_features_in_))  # zero initialisation
             self.intercept_ = np.zeros(1)
             self.feature_dim_ = self.n_features_in_
-        elif not np.isin(y, self.classes_).all():
+        if not np.isin(y, self.classes_).all():
             raise ValueError(f"y contains labels outside classes_={self.classes_.tolist()}")
 
         pos = y == self.classes_[1]
@@ -297,6 +297,11 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
             return np.arange(len(pos))
         neg_idx = np.flatnonzero(~pos)
         n_req = math.floor(n_pos / self.target_to_negatives + 1e-9)
+        if len(neg_idx) and n_req == 0:
+            raise ValueError(
+                "target_to_negatives requests zero negatives for this batch; use a smaller "
+                "ratio or include more target samples."
+            )
         if len(neg_idx) > n_req:
             neg_idx = np.sort(self._rng.choice(neg_idx, n_req, replace=False))
         return np.sort(np.concatenate([np.flatnonzero(pos), neg_idx]))
@@ -305,7 +310,13 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         if self.pos_weight is None:
             return None
         if isinstance(self.pos_weight, str):  # "balanced"
-            return max(1, int((~pos).sum())) / max(1, int(pos.sum()))
+            n_pos = int(pos.sum())
+            n_neg = int((~pos).sum())
+            # A one-class experience must not make its only observed class almost weightless.
+            # There is no within-batch class ratio to balance in this case.
+            if n_pos == 0 or n_neg == 0:
+                return 1.0
+            return n_neg / n_pos
         return float(self.pos_weight)
 
     def _replay_pool(self):
