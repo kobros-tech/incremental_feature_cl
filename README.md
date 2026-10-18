@@ -179,13 +179,16 @@ class arrives once, class order shuffled per seed) for four methods on identical
 - `joint_matched`: offline, class-mixed training with the same expansion schedule and the same
   total training exposure as the stream: the rows are split at random into one stage per
   experience, so every row is presented `n_epochs` times in total (any remainder is handled by
-  `np.array_split`). Only the class-incremental ordering differs.
+  `np.array_split`). Its minibatches are class-mixed, whereas the stream methods only ever see
+  the classes of the current experience; that difference is intended, and it is the only one in
+  training exposure and capacity.
 
 The two offline methods are trained on all classes at once, so they have no arrival order: they
 report final metrics only, and values defined by arrival (at arrival, incremental, forgetting,
 backward transfer) are shown as `n/a`. In the plots they appear as horizontal reference lines.
 
-**Training budget.** Each method's training exposure is reported per class model: the current
+**Training budget.** Each method's training exposure is reported per class model (and a test
+counts the rows at the optimiser's gradient step, independently of the reported figures): the current
 samples presented to the optimiser (equal for all four methods, `n_epochs` x training rows) and,
 for `replay`, the extra replayed samples (about 60% more on the datasets below). Replay therefore
 takes more gradient steps than `naive`. As a control, `naive` with 8 or 10 epochs instead of 5

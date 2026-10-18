@@ -16,7 +16,8 @@ matrices indexed ``[experience, class]``:
 Four methods are compared on the same data and seeds: ``naive`` (no replay), ``replay`` (the
 package's bounded memory), ``joint`` (one offline fit on all data, no feature expansion) and
 ``joint_matched`` (offline, class-mixed training with the same feature-expansion schedule and the
-same total training exposure as the stream: every row is presented ``n_epochs`` times in total).
+same total training exposure as the stream: every row is presented ``n_epochs`` times in total;
+its minibatches are class-mixed, while the stream only sees the current experience's classes).
 The two offline methods are trained on all classes at once, so they report final metrics only;
 values defined by order of arrival (at arrival, incremental, forgetting) are NaN for them.  The
 training exposure of every method, including replayed samples, is reported alongside.  Replay memory is accounted for in

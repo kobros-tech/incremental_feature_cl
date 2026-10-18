@@ -205,3 +205,34 @@ def test_no_seen_negatives_gives_nan_not_an_error():
     out = ce._evaluate(Stub(), y[:, None].astype(float), y, seen=[0])
     assert out[0]["recall"] == 1.0
     assert np.isnan(out[0]["specificity"]) and np.isnan(out[0]["auc"])
+
+
+@pytest.mark.parametrize("method", ce.METHODS)
+def test_budget_audited_at_the_gradient_step_not_from_reported_diagnostics(monkeypatch, method):
+    """Count rows where the optimiser consumes them, independently of ``last_fit_diagnostics_``."""
+    from incremental_feature_cl import IncrementalFeatureMapModel as Model
+
+    rows_per_estimator: dict[int, int] = {}
+    original = Model._gradients
+
+    def spy(self, X, pos, weight):
+        rows_per_estimator[id(self)] = rows_per_estimator.get(id(self), 0) + len(X)
+        return original(self, X, pos, weight)
+
+    monkeypatch.setattr(Model, "_gradients", spy)
+    n_epochs = 2
+    r = ce.run_stream("digits", method, seed=0, n_epochs=n_epochs, n_experiences=4)
+    n_models = len(rows_per_estimator)
+    assert n_models == 10  # one binary model per class
+    mean_rows = sum(rows_per_estimator.values()) / n_models
+    s = r["summary"]
+    if method == "replay":
+        # optimiser rows = own samples + replayed samples; both parts must match what is reported
+        assert mean_rows == pytest.approx(
+            s["train_presentations_current"] + s["train_presentations_replay"]
+        )
+        assert mean_rows > n_epochs * r["n_train_rows"]
+    else:
+        # no replay: the optimiser sees every training row exactly n_epochs times, nothing more
+        assert mean_rows == n_epochs * r["n_train_rows"]
+        assert s["train_presentations_replay"] == 0
