@@ -56,7 +56,7 @@ The model is binary by design. In the binary encoding, `classes_[1]` is the posi
 - `expand_features()` can append a block explicitly. Its classifier coefficients start at zero, so the decision scores must remain unchanged before further training.
 - `replay_mem_size=200` enables a bounded binary replay buffer by default. `replay_mem_size=0` disables replay; values of 1 are rejected because the buffer is split between the two binary labels.
 - `target_to_negatives` applies to the current batch before replay. It is a **target-samples-per-negative** ratio: `0.2` requests one target per five negatives, `1.0` requests a 1:1 ratio, and `None` keeps all negatives. If the requested ratio would discard every available negative, training raises an error rather than silently fitting a positive-only batch.
-- `pos_weight="balanced"` uses the negative-to-positive ratio when both labels occur in the current batch. For a one-label batch it uses 1.0; it does not make the absent class appear in that batch.
+- `pos_weight="balanced"` uses the negative-to-positive ratio when both labels occur in the current batch. Before both labels have appeared together it uses 1.0; afterwards it retains the last valid weight for one-label batches so replayed positives remain weighted.
 
 Replay memory is balanced between the binary target and non-target labels. This is **not equivalent** to a buffer balanced over the original multiclass IDs; comparisons with a multiclass replay baseline must state that distinction.
 
