@@ -574,3 +574,23 @@ def test_predict_treats_zero_score_as_positive():
     model.coef_[:] = 0.0
     model.intercept_[:] = 0.0
     np.testing.assert_array_equal(model.predict(np.array([[-2.0], [0.0], [2.0]])), [1, 1, 1])
+
+
+def test_target_to_negatives_reports_actual_post_sampling_counts():
+    rng = np.random.RandomState(17)
+    X = rng.standard_normal((110, 3))
+    y = np.r_[np.ones(10, dtype=int), np.zeros(100, dtype=int)]
+    model = Model(
+        target_to_negatives=0.2,
+        replay_mem_size=0,
+        n_epochs=1,
+        batch_size=32,
+        random_state=4,
+    )
+    model.partial_fit(X, y, classes=[0, 1])
+
+    diagnostics = model.last_fit_diagnostics_
+    # 0.2 means one target per five negatives: keep floor(10 / 0.2) = 50 negatives.
+    assert diagnostics["current_target_after_ratio"] == 10
+    assert diagnostics["current_negative_after_ratio"] == 50
+    assert diagnostics["current_samples_after_ratio"] == 60

@@ -451,7 +451,9 @@ def test_test_labels_do_not_change_training_or_calibration(monkeypatch):
 def test_repeated_target_exposure_is_distinct_from_natural_class_arrival():
     import experiments.run_target as runner
 
-    target_class = int(np.max(runner.load_dataset("synthetic", seed=5)[2]))
+    # Class 2 arrives in the middle experience, leaving a later experience in which
+    # target examples should be reintroduced without leaking into earlier experiences.
+    target_class = 2
     result = runner.run_experiment(
         dataset="synthetic",
         target_class=target_class,
@@ -461,13 +463,26 @@ def test_repeated_target_exposure_is_distinct_from_natural_class_arrival():
         new_feature_dim=1,
         target_every_experience=True,
     )
-    assert result["first_training_exposure_experience"] == 0
-    assert result["natural_target_arrival_experience"] > 0
-    assert result["fixed_threshold_calibration_experience"] == 0
-    arrival_row = result["history"][result["natural_target_arrival_experience"]]
+    natural_arrival = result["natural_target_arrival_experience"]
+    assert natural_arrival == 1
+    assert result["first_training_exposure_experience"] == natural_arrival
+    assert result["fixed_threshold_calibration_experience"] == natural_arrival
+
+    pre_arrival_row = result["history"][0]
+    assert target_class not in pre_arrival_row["classes_in_training_batch"]
+    assert pre_arrival_row["target_added_to_experience"] is False
+    assert pre_arrival_row["first_training_exposure_experience"] is None
+
+    arrival_row = result["history"][natural_arrival]
     assert target_class in arrival_row["classes_arriving"]
     assert target_class in arrival_row["classes_in_training_batch"]
+    assert arrival_row["target_added_to_experience"] is False
     assert result["target_recall_at_natural_class_arrival"] == arrival_row["target_recall"]
+
+    later_row = result["history"][natural_arrival + 1]
+    assert target_class not in later_row["classes_arriving"]
+    assert target_class in later_row["classes_in_training_batch"]
+    assert later_row["target_added_to_experience"] is True
 
 
 def test_future_class_validation_features_do_not_change_earlier_threshold(monkeypatch):
@@ -523,4 +538,45 @@ def test_future_class_validation_features_do_not_change_earlier_threshold(monkey
     assert (
         baseline_row["threshold_calibration"]["threshold"]
         == changed_row["threshold_calibration"]["threshold"]
+    )
+
+
+def test_recall_diagnostics_separate_zero_calibrated_and_frozen_thresholds():
+    result = run_experiment(
+        dataset="synthetic",
+        target_class=0,
+        n_experiences=3,
+        seed=11,
+        new_feature_dim=1,
+        n_epochs=1,
+        replay_mem_size=20,
+    )
+    history = result["history"]
+    for row in history:
+        assert row["target_recall_at_zero_threshold"] == row["target_recall"]
+        assert row["target_recall_forgetting_at_zero_threshold"] == row["target_recall_forgetting"]
+        if row["best_target_recall"] is not None and np.isfinite(row["target_recall"]):
+            assert row["target_recall_forgetting_at_zero_threshold"] == pytest.approx(
+                max(0.0, row["best_target_recall"] - row["target_recall_at_zero_threshold"])
+            )
+        assert (
+            row["target_recall_at_validation_selected_threshold"]
+            == row["threshold_calibration"]["test"]["target_recall"]
+        )
+        assert (
+            row["target_recall_at_fixed_threshold"]
+            == row["fixed_threshold_calibration"]["test"]["target_recall"]
+        )
+
+    calibration_exp = result["fixed_threshold_calibration_experience"]
+    calibration_row = history[calibration_exp]
+    assert calibration_row["fixed_threshold_target_recall_change_since_calibration"] == 0.0
+    assert result["final_fixed_threshold_target_recall_change_since_calibration"] == pytest.approx(
+        history[-1]["target_recall_at_fixed_threshold"]
+        - calibration_row["target_recall_at_fixed_threshold"]
+    )
+    assert result["final_target_recall_at_zero_threshold"] == history[-1]["target_recall"]
+    assert (
+        result["final_target_recall_at_validation_selected_threshold"]
+        == history[-1]["threshold_calibration"]["test"]["target_recall"]
     )

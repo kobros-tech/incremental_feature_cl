@@ -114,6 +114,7 @@ def run_experiment(
     fixed_threshold_validation_metrics = None
     fixed_threshold_calibration_experience = None
     fixed_threshold_validation_classes = None
+    fixed_threshold_target_recall_at_calibration = None
     natural_target_arrival_experience = next(
         (exp for exp, stream in enumerate(streams) if np.any(y_fit[stream] == target_class)),
         None,
@@ -124,10 +125,16 @@ def run_experiment(
     for experience, stream_indices in enumerate(streams):
         arriving_classes = np.unique(y_fit[stream_indices]).astype(int).tolist()
         indices = stream_indices
-        if target_every_experience and target_class not in arriving_classes:
-            # Keep the target task learnable after its class would otherwise disappear
-            # from the class-incremental stream. Test data remains strictly held out.
+        target_added_to_experience = False
+        if (
+            target_every_experience
+            and experience > natural_target_arrival_experience
+            and target_class not in arriving_classes
+        ):
+            # Reintroduce the target only after its natural class arrival. Earlier
+            # experiences remain a genuine pre-arrival stream; test data stays held out.
             indices = np.concatenate([stream_indices, target_indices])
+            target_added_to_experience = True
         y_current = (y_fit[indices] == target_class).astype(int)
         if hasattr(model, "classes_"):
             before_score_diagnostics = _score_diagnostics(
@@ -233,6 +240,19 @@ def run_experiment(
                 else target_metrics(y_test_binary, scores_after, threshold=fixed_threshold)
             ),
         }
+        fixed_threshold_test_recall = (
+            None
+            if fixed_threshold_calibration["test"] is None
+            else fixed_threshold_calibration["test"]["target_recall"]
+        )
+        if experience == fixed_threshold_calibration_experience:
+            fixed_threshold_target_recall_at_calibration = fixed_threshold_test_recall
+        fixed_threshold_recall_change_since_calibration = (
+            None
+            if fixed_threshold_target_recall_at_calibration is None
+            or fixed_threshold_test_recall is None
+            else float(fixed_threshold_test_recall - fixed_threshold_target_recall_at_calibration)
+        )
         after_score_diagnostics = _score_diagnostics(y_test_binary, scores_after)
         if coef_before is None:
             coefficient_change = None
@@ -275,9 +295,7 @@ def run_experiment(
                 "first_training_exposure_experience": first_training_exposure_experience,
                 "fixed_threshold_calibration_experience": fixed_threshold_calibration_experience,
                 "target_every_experience": bool(target_every_experience),
-                "target_added_to_experience": bool(
-                    target_every_experience and target_class not in arriving_classes
-                ),
+                "target_added_to_experience": target_added_to_experience,
                 "n_train": len(indices),
                 "n_validation": len(y_validation),
                 "n_target_train": int(y_current.sum()),
@@ -287,6 +305,21 @@ def run_experiment(
                 "target_to_negatives": target_to_negatives,
                 "best_target_recall": best_target_recall,
                 "target_recall_forgetting": forgetting,
+                "target_recall_forgetting_at_zero_threshold": forgetting,
+                # Explicitly distinguish the default zero threshold from calibrated thresholds.
+                "target_recall_at_zero_threshold": metrics["target_recall"],
+                "target_recall_at_validation_selected_threshold": (
+                    None
+                    if threshold_calibration["test"] is None
+                    else threshold_calibration["test"]["target_recall"]
+                ),
+                "target_recall_at_fixed_threshold": fixed_threshold_test_recall,
+                "fixed_threshold_target_recall_at_calibration": (
+                    fixed_threshold_target_recall_at_calibration
+                ),
+                "fixed_threshold_target_recall_change_since_calibration": (
+                    fixed_threshold_recall_change_since_calibration
+                ),
                 "target_recall_at_arrival": recall_at_arrival,
                 "target_recall_at_first_training_exposure": recall_at_arrival,
                 "target_recall_at_natural_class_arrival": recall_at_natural_arrival,
@@ -326,8 +359,19 @@ def run_experiment(
         "train_blocks": bool(train_blocks),
         "history": history,
         "final_target_recall_forgetting": history[-1]["target_recall_forgetting"],
+        "final_target_recall_forgetting_at_zero_threshold": history[-1][
+            "target_recall_forgetting_at_zero_threshold"
+        ],
         "final_target_recall_change_since_arrival": history[-1][
             "target_recall_change_since_arrival"
+        ],
+        "final_target_recall_at_zero_threshold": history[-1]["target_recall_at_zero_threshold"],
+        "final_target_recall_at_validation_selected_threshold": history[-1][
+            "target_recall_at_validation_selected_threshold"
+        ],
+        "final_target_recall_at_fixed_threshold": history[-1]["target_recall_at_fixed_threshold"],
+        "final_fixed_threshold_target_recall_change_since_calibration": history[-1][
+            "fixed_threshold_target_recall_change_since_calibration"
         ],
         "target_recall_at_first_training_exposure": recall_at_arrival,
         "target_recall_at_natural_class_arrival": recall_at_natural_arrival,
@@ -370,7 +414,8 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Include the same training target examples in every experience (default). "
+            "Include the same training target examples at natural arrival and in every "
+            "later experience (default). Earlier experiences remain target-free. "
             "Use --no-target-every-experience for a strict class-once stream."
         ),
     )
