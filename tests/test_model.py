@@ -383,6 +383,8 @@ def test_balanced_pos_weight_is_finite_for_single_class_experiences():
     assert model._pos_weight(np.ones(12, dtype=bool)) == 1.0
     assert model._pos_weight(np.zeros(12, dtype=bool)) == 1.0
     assert model._pos_weight(np.array([True, True, False, False, False])) == 1.5
+    # Keep the learned class balance for later single-class experiences with replay.
+    assert model._pos_weight(np.zeros(12, dtype=bool)) == 1.5
 
 
 def test_first_partial_fit_rejects_labels_outside_declared_classes():
