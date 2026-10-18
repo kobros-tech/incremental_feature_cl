@@ -187,13 +187,17 @@ The two offline methods are trained on all classes at once, so they have no arri
 report final metrics only, and values defined by arrival (at arrival, incremental, forgetting,
 backward transfer) are shown as `n/a`. In the plots they appear as horizontal reference lines.
 
-**Training budget.** Each method's training exposure is reported per class model (and a test
-counts the rows at the optimiser's gradient step, independently of the reported figures): the current
+**Training budget.** Each method's training exposure is reported per class model: the current
 samples presented to the optimiser (equal for all four methods, `n_epochs` x training rows) and,
-for `replay`, the extra replayed samples (about 60% more on the datasets below). Replay therefore
-takes more gradient steps than `naive`. As a control, `naive` with 8 or 10 epochs instead of 5
-did not improve (final recall 0.57 and 0.56 on `digits`, 0.33 and 0.32 on `synthetic`, against
-0.56 and 0.36 at 5 epochs), so the replay advantage is not explained by extra optimisation.
+for `replay`, the extra replayed samples (about 60% more on the datasets below). A test counts
+rows and gradient updates at the optimiser's gradient computation, independently of the reported
+figures. Replay appends its replayed samples to each current minibatch, so it processes more
+sample presentations than `naive` while performing the same number of gradient updates for the
+same current-data minibatches; its updates are more expensive because each batch is larger. As a
+control for the extra presentations, `naive` with 8 or 10 epochs instead of 5 (more updates and
+more presentations) did not improve (final recall 0.57 and 0.56 on `digits`, 0.33 and 0.32 on
+`synthetic`, against 0.56 and 0.36 at 5 epochs), so the replay advantage is not explained by
+simply training naive for longer.
 
 After each experience it scores every class seen so far and reports, per class, **recall**,
 **specificity**, **accuracy** (arg-max over seen classes) and **AUC**, summarised as final value,

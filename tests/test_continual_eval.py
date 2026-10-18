@@ -208,8 +208,12 @@ def test_no_seen_negatives_gives_nan_not_an_error():
 
 
 @pytest.mark.parametrize("method", ce.METHODS)
-def test_budget_audited_at_the_gradient_step_not_from_reported_diagnostics(monkeypatch, method):
-    """Count rows where the optimiser consumes them, independently of ``last_fit_diagnostics_``."""
+def test_sample_exposure_audited_at_gradient_computation(monkeypatch, method):
+    """Count rows consumed by ``_gradients``, independently of ``last_fit_diagnostics_``.
+
+    This audits sample presentations (rows), not gradient-update calls; see the test below for
+    the number of updates.
+    """
     from incremental_feature_cl import IncrementalFeatureMapModel as Model
 
     rows_per_estimator: dict[int, int] = {}
@@ -236,3 +240,25 @@ def test_budget_audited_at_the_gradient_step_not_from_reported_diagnostics(monke
         # no replay: the optimiser sees every training row exactly n_epochs times, nothing more
         assert mean_rows == n_epochs * r["n_train_rows"]
         assert s["train_presentations_replay"] == 0
+
+
+def test_replay_adds_sample_presentations_but_not_gradient_updates(monkeypatch):
+    from incremental_feature_cl import IncrementalFeatureMapModel as Model
+
+    calls = {"n": 0, "rows": 0}
+    original = Model._gradients
+
+    def spy(self, X, pos, weight):
+        calls["n"] += 1
+        calls["rows"] += len(X)
+        return original(self, X, pos, weight)
+
+    monkeypatch.setattr(Model, "_gradients", spy)
+    measured = {}
+    for method in ("naive", "replay"):
+        calls.update(n=0, rows=0)
+        ce.run_stream("digits", method, seed=0, n_epochs=2, n_experiences=4)
+        measured[method] = dict(calls)
+    # one gradient computation per current minibatch, with replay rows appended to the batch
+    assert measured["replay"]["n"] == measured["naive"]["n"]
+    assert measured["replay"]["rows"] > measured["naive"]["rows"]
