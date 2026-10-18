@@ -86,6 +86,9 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         Positive-class weighting for replay samples. "current" applies the current
         experience's positive weight to replayed targets; "uniform" gives replayed
         targets weight 1.0. Current samples retain their configured weighting.
+    inference_batch_size : int, default=256
+        Maximum number of rows transformed at once by decision_function. Smaller
+        batches bound temporary feature-map allocations during evaluation.
     replay_mem_size : int, default=200
         Total replay memory, split equally between target and non-target samples (the binary form
         of a class-balanced buffer).  Each class keeps a reservoir sample, so every sample trained
@@ -140,6 +143,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         "n_epochs": [Interval(numbers.Integral, 1, None, closed="left")],
         "random_state": ["random_state"],
         "replay_pos_weight": [StrOptions({"current", "uniform"})],
+        "inference_batch_size": [Interval(numbers.Integral, 1, None, closed="left")],
     }
 
     def __init__(
@@ -156,6 +160,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         n_epochs=5,
         random_state=None,
         replay_pos_weight="current",
+        inference_batch_size=256,
     ):
         self.new_feature_dim = new_feature_dim
         self.target_to_negatives = target_to_negatives
@@ -169,6 +174,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         self.n_epochs = n_epochs
         self.random_state = random_state
         self.replay_pos_weight = replay_pos_weight
+        self.inference_batch_size = inference_batch_size
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
@@ -408,10 +414,23 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         return np.hstack([X] + [blk(X) for blk in self.blocks_])
 
     def decision_function(self, X) -> np.ndarray:
-        """Score over ``Phi_t(x)``; positive means ``classes_[1]``."""
+        """Score over ``Phi_t(x)``; positive means ``classes_[1]``.
+
+        Transform rows in bounded batches so evaluation does not materialize the
+        expanded feature matrix for the entire test set at once.
+        """
         check_is_fitted(self, "classes_")
         X = validate_data(self, X, reset=False, dtype=np.float64)
-        return self._features(X) @ self.coef_[0] + self.intercept_[0]
+        batch_size = self.inference_batch_size
+        if len(X) <= batch_size:
+            return self._features(X) @ self.coef_[0] + self.intercept_[0]
+
+        scores = np.empty(len(X), dtype=np.float64)
+        for start in range(0, len(X), batch_size):
+            stop = min(start + batch_size, len(X))
+            X_batch = X[start:stop]
+            scores[start:stop] = self._features(X_batch) @ self.coef_[0] + self.intercept_[0]
+        return scores
 
     def predict_proba(self, X) -> np.ndarray:
         p = expit(self.decision_function(X))
