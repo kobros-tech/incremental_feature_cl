@@ -19,7 +19,7 @@ For plots, install the optional experiment dependencies:
 pip install -e ".[experiments]"
 ```
 
-Runtime dependencies are NumPy, SciPy, and scikit-learn. PyTorch and Avalanche are not package dependencies. The digits and synthetic experiments need no downloads. For CIFAR-100, pass `--data-dir` to use an already-extracted official Python dataset directory; otherwise the experiment downloads the official archive on first use, verifies its checksum, and caches it under `data/`. In either case, it samples up to 100 training and 20 test images per class for a reproducible lightweight run.
+Runtime dependencies are NumPy, SciPy, and scikit-learn. PyTorch and Avalanche are not package dependencies. The digits and synthetic experiments need no downloads. For CIFAR-100, `--dataset cifar100` downloads the official archive on first use, verifies its checksum, and caches it under `data/`; `--dataset /path/to/cifar-100-python` uses an already-extracted official Python dataset directory instead. In either case, it samples up to 100 training and 20 test images per class for a reproducible lightweight run.
 
 ## Use as a binary estimator or with OneVsRestClassifier
 
@@ -85,17 +85,19 @@ python -m experiments.run_target \
 
 ### CIFAR-100 target-vs-rest stream
 
-Use the extracted directory directly (the directory can itself contain `train` and `test`, or contain a `cifar-100-python/` subdirectory with those files):
+`--dataset` is either a name (`digits`, `synthetic`, `cifar100`) or the path of an extracted CIFAR-100 directory. The directory can itself contain `train` and `test`, or contain a `cifar-100-python/` subdirectory with those files; a path implies `cifar100`, so there is no separate data-directory flag.
 
 ```bash
+# extracted copy on disk
 python -m experiments.run_target \
-  --dataset cifar100 --data-dir /path/to/cifar-100-python \
+  --dataset /path/to/cifar-100-python \
   --target-class 17 --n-experiences 20 \
   --new-feature-dim 16 --n-epochs 5 --seed 1 \
   --output results/cifar100_target.json
-```
 
-Omit `--data-dir` to use the checksum-verified download/cache instead.
+# or the checksum-verified download/cache
+python -m experiments.run_target --dataset cifar100 --target-class 17 --n-experiences 20
+```
 
 This deliberately uses a deterministic subset of flattened raw pixels, not a learned image backbone. Treat it as an exploratory binary baseline; it is not directly comparable to the earlier PyTorch/Avalanche experiments that used a different model and training pipeline.
 
@@ -125,7 +127,13 @@ python -m experiments.plot_results \
   --results results/replay_comparison.json --output-dir results/replay_plots
 ```
 
-The run history also reports target-recall forgetting: the drop from the best target recall observed after the target class arrives. It is a one-target diagnostic, not the conventional average forgetting across a multiclass benchmark.
+The run history reports two target-recall diagnostics. `target_recall_forgetting` is the drop from the **best** recall seen since the target arrived; the maximum over a noisy series is biased upward, so a single lucky spike inflates it. `target_recall_change_since_arrival` compares with the recall measured when the target first arrived and is the safer number; read it together with `roc_auc`. If AUC is steady while recall and specificity move in opposite directions, the zero threshold is drifting along a stable ranking; that is not loss of target knowledge. Both are one-target diagnostics, not the conventional average forgetting across a multiclass benchmark. With 20 test images per class, one recall reading has a granularity of 0.05.
+
+`--replay-pos-weight current` (the default) reuses the retained positive weight for replayed targets; `uniform` gives them weight 1. On a synthetic raw-pixel stand-in it raised balanced accuracy over `uniform` by moving the operating point (higher recall, lower specificity) without changing ROC AUC, and it did not reduce the recall swing across experiences.
+
+**Replay memory size with scarce targets.** The buffer is split evenly between the two labels, but a label can only fill its half if enough samples have arrived. With one target class seen once (100 images) a memory of 1000 holds 100 targets and 500 negatives, and on the synthetic stand-in that lowered balanced accuracy by 0.048 ± 0.006 compared with a memory of 200. Check `last_fit_diagnostics_["memory_target"]` against `["memory_negative"]` when changing `replay_mem_size`.
+
+**Step size and input scale.** `learning_rate_init=0.01` is plain SGD, so it interacts with the squared input norm. Flattened 32x32x3 pixels have `||x||^2` of about 850 in [0, 1] and about 3072 once standardised per pixel; on the synthetic stand-in, standardising at 0.01 was worse than raw pixels, and a smaller step (for example 0.001) was needed for the larger norm. Treat `learning_rate_init` and the feature scale as one setting.
 
 ### Plot a saved run and verify the mathematical reference
 

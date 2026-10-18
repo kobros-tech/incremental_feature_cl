@@ -10,12 +10,17 @@ from pathlib import Path
 
 import numpy as np
 
+from experiments.data import resolve_dataset
 from experiments.run_target import run_experiment
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", choices=["digits", "synthetic", "cifar100"], default="digits")
+    parser.add_argument(
+        "--dataset",
+        default="digits",
+        help="digits, synthetic, cifar100, or the path of an extracted CIFAR-100 directory.",
+    )
     parser.add_argument("--target-class", type=int, default=5)
     parser.add_argument("--n-experiences", type=int, default=5)
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
@@ -26,6 +31,10 @@ def main() -> None:
     parser.add_argument("--replay-mem-size", type=int, default=200)
     parser.add_argument("--output", type=Path, default=Path("results/ratio_comparison.json"))
     args = parser.parse_args()
+    try:
+        dataset_name, data_dir = resolve_dataset(args.dataset)
+    except (ValueError, FileNotFoundError) as error:
+        parser.error(str(error))
 
     ratios: list[float | None] = list(args.ratios)
     if args.include_all_negatives:
@@ -68,7 +77,8 @@ def main() -> None:
         )
 
     output = {
-        "dataset": args.dataset,
+        "dataset": dataset_name,
+        "data_dir": None if data_dir is None else str(data_dir),
         "target_class": args.target_class,
         "n_experiences": args.n_experiences,
         "seeds": args.seeds,

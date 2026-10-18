@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from experiments.data import class_incremental_indices, load_dataset
+from experiments.data import DATASETS, class_incremental_indices, load_dataset, resolve_dataset
 from experiments.metrics import target_metrics
 from incremental_feature_cl import IncrementalFeatureMapModel
 
@@ -50,7 +50,7 @@ def _coefficient_diagnostics(model: IncrementalFeatureMapModel) -> dict:
 
 
 def run_experiment(
-    dataset: str = "digits",
+    dataset: str | Path = "digits",
     target_class: int = 5,
     n_experiences: int = 5,
     seed: int = 0,
@@ -59,13 +59,13 @@ def run_experiment(
     replay_mem_size: int = 200,
     target_to_negatives: float | None = None,
     train_blocks: bool = True,
-    data_dir: str | Path | None = None,
     replay_pos_weight: str = "current",
 ) -> dict:
     if n_experiences < 1:
         raise ValueError("n_experiences must be at least 1.")
 
-    X_train, X_test, y_train, y_test = load_dataset(dataset, seed, data_dir=data_dir)
+    name, data_dir = resolve_dataset(dataset)
+    X_train, X_test, y_train, y_test = load_dataset(dataset, seed)
     if target_class not in np.unique(y_train):
         raise ValueError(f"target_class={target_class} is absent from the training split.")
 
@@ -85,6 +85,7 @@ def run_experiment(
     history = []
     target_seen = False
     best_target_recall = None
+    recall_at_arrival = None
     streams = class_incremental_indices(y_train, n_experiences)
 
     for experience, indices in enumerate(streams):
@@ -129,6 +130,11 @@ def run_experiment(
         arriving_classes = np.unique(y_train[indices]).astype(int).tolist()
         target_seen = target_seen or target_class in arriving_classes
         target_recall = metrics["target_recall"]
+        if target_seen and recall_at_arrival is None and np.isfinite(target_recall):
+            recall_at_arrival = target_recall
+        change_since_arrival = (
+            None if recall_at_arrival is None else float(target_recall - recall_at_arrival)
+        )
         if target_seen and np.isfinite(target_recall):
             if best_target_recall is None or target_recall > best_target_recall:
                 best_target_recall = target_recall
@@ -147,6 +153,8 @@ def run_experiment(
                 "target_to_negatives": target_to_negatives,
                 "best_target_recall": best_target_recall,
                 "target_recall_forgetting": forgetting,
+                "target_recall_at_arrival": recall_at_arrival,
+                "target_recall_change_since_arrival": change_since_arrival,
                 "scores_before_update": before_score_diagnostics,
                 "scores_after_update": after_score_diagnostics,
                 "coefficient_change": coefficient_change,
@@ -159,7 +167,8 @@ def run_experiment(
         )
 
     return {
-        "dataset": dataset,
+        "dataset": name,
+        "data_dir": None if data_dir is None else str(data_dir),
         "target_class": int(target_class),
         "n_experiences": int(n_experiences),
         "seed": int(seed),
@@ -171,17 +180,22 @@ def run_experiment(
         "train_blocks": bool(train_blocks),
         "history": history,
         "final_target_recall_forgetting": history[-1]["target_recall_forgetting"],
+        "final_target_recall_change_since_arrival": history[-1][
+            "target_recall_change_since_arrival"
+        ],
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", choices=["digits", "synthetic", "cifar100"], default="digits")
     parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=None,
-        help="Extracted CIFAR-100 directory (contains train/test or a cifar-100-python subdirectory).",
+        "--dataset",
+        default="digits",
+        help=(
+            f"One of {', '.join(DATASETS)}, or the path of an extracted CIFAR-100 directory "
+            "(train/test inside it or inside a cifar-100-python subdirectory). 'cifar100' "
+            "downloads and caches the official archive."
+        ),
     )
     parser.add_argument("--target-class", type=int, default=5)
     parser.add_argument("--n-experiences", type=int, default=5)
@@ -207,6 +221,10 @@ def main() -> None:
     parser.add_argument("--fixed-blocks", action="store_true", help="Do not train feature blocks.")
     parser.add_argument("--output", type=Path, default=Path("results/target_run.json"))
     args = parser.parse_args()
+    try:
+        resolve_dataset(args.dataset)
+    except (ValueError, FileNotFoundError) as error:
+        parser.error(str(error))
 
     result = run_experiment(
         dataset=args.dataset,
@@ -218,7 +236,6 @@ def main() -> None:
         replay_mem_size=args.replay_mem_size,
         target_to_negatives=args.target_to_negatives,
         train_blocks=not args.fixed_blocks,
-        data_dir=args.data_dir,
         replay_pos_weight=args.replay_pos_weight,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -6,7 +6,7 @@ import pickle
 import numpy as np
 import pytest
 
-from experiments.data import class_incremental_indices, load_dataset
+from experiments.data import class_incremental_indices, load_dataset, resolve_dataset
 from experiments.math_reference import polynomial_features
 from experiments.metrics import target_metrics
 from experiments.run_target import run_experiment
@@ -49,6 +49,12 @@ def test_run_target_returns_one_record_per_experience():
     assert result["history"][-1]["feature_dim"] == 32 + 2 * 2
     assert result["history"][-1]["target_recall_forgetting"] is not None
     assert result["final_target_recall_forgetting"] is not None
+    history = result["history"]
+    arrival = next(row for row in history if row["target_recall_at_arrival"] is not None)
+    assert arrival["target_recall_change_since_arrival"] == 0.0
+    assert result["final_target_recall_change_since_arrival"] == pytest.approx(
+        history[-1]["target_recall"] - arrival["target_recall"]
+    )
 
 
 def test_polynomial_features_match_degree_two_kernel():
@@ -60,9 +66,8 @@ def test_polynomial_features_match_degree_two_kernel():
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
 
-@pytest.mark.parametrize("nested", [False, True])
-def test_load_cifar100_from_extracted_directory(tmp_path, nested):
-    data_dir = tmp_path / "cifar-100-python" if nested else tmp_path
+def _write_fake_cifar(root, nested):
+    data_dir = root / "cifar-100-python" if nested else root
     data_dir.mkdir(parents=True, exist_ok=True)
     train_data = np.arange(4 * 3072, dtype=np.uint8).reshape(4, 3072)
     test_data = np.arange(2 * 3072, dtype=np.uint8).reshape(2, 3072)
@@ -77,7 +82,12 @@ def test_load_cifar100_from_extracted_directory(tmp_path, nested):
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
 
-    X_train, X_test, y_train, y_test = load_dataset("cifar100", seed=7, data_dir=tmp_path)
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_load_cifar100_from_extracted_directory(tmp_path, nested):
+    _write_fake_cifar(tmp_path, nested)
+
+    X_train, X_test, y_train, y_test = load_dataset(str(tmp_path), seed=7)
 
     assert X_train.shape == (4, 3072)
     assert X_test.shape == (2, 3072)
@@ -87,6 +97,37 @@ def test_load_cifar100_from_extracted_directory(tmp_path, nested):
     assert X_train.max() <= 1.0
 
 
-def test_load_cifar100_rejects_directory_without_batch_files(tmp_path):
+@pytest.mark.parametrize("name", ["digits", "synthetic", "cifar100"])
+def test_resolve_dataset_accepts_names(name):
+    assert resolve_dataset(name) == (name, None)
+
+
+def test_resolve_dataset_turns_a_directory_into_cifar100(tmp_path):
+    _write_fake_cifar(tmp_path, nested=True)
+    assert resolve_dataset(tmp_path) == ("cifar100", tmp_path)
+    assert resolve_dataset(str(tmp_path)) == ("cifar100", tmp_path)
+
+
+def test_resolve_dataset_rejects_directory_without_batch_files(tmp_path):
     with pytest.raises(FileNotFoundError, match="train/test files"):
-        load_dataset("cifar100", data_dir=tmp_path)
+        resolve_dataset(tmp_path)
+    with pytest.raises(FileNotFoundError, match="train/test files"):
+        load_dataset(tmp_path)
+
+
+def test_resolve_dataset_rejects_unknown_name(tmp_path):
+    with pytest.raises(ValueError, match="Unsupported dataset"):
+        resolve_dataset("mnist")
+    with pytest.raises(ValueError, match="Unsupported dataset"):
+        resolve_dataset(tmp_path / "missing")
+
+
+def test_run_experiment_accepts_a_cifar_directory_as_dataset(tmp_path):
+    _write_fake_cifar(tmp_path, nested=False)
+    result = run_experiment(
+        dataset=str(tmp_path), target_class=0, n_experiences=2, n_epochs=1, new_feature_dim=2
+    )
+    assert result["dataset"] == "cifar100"
+    assert result["data_dir"] == str(tmp_path)
+    assert len(result["history"]) == 2
+    assert result["history"][-1]["feature_dim"] == 3072 + 2
