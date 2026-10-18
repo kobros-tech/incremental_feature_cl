@@ -60,6 +60,30 @@ def test_expansion_is_zero_initialised_and_continuous(binary, train_blocks):
     np.testing.assert_allclose(m.decision_function(X), before)
 
 
+def test_decision_function_batches_feature_transforms(binary):
+    X, y = binary
+    model = Model(new_feature_dim=8, n_epochs=1, inference_batch_size=37, random_state=0)
+    model.partial_fit(X[:200], y[:200], classes=[0, 1]).partial_fit(X[200:], y[200:])
+
+    # Compare against the original full-matrix calculation, then verify no transform
+    # sees more rows than the configured batch size.
+    expected = model._features(X) @ model.coef_[0] + model.intercept_[0]
+    original_features = model._features
+    batch_lengths = []
+
+    def record_feature_batch(X_batch):
+        batch_lengths.append(len(X_batch))
+        return original_features(X_batch)
+
+    model._features = record_feature_batch
+    actual = model.decision_function(X)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+    assert len(batch_lengths) == 11
+    assert max(batch_lengths) <= 37
+    assert batch_lengths[-1] == 30
+
+
 def test_partial_fit_expands_after_first_call(binary):
     X, y = binary
     m = Model(new_feature_dim=4, random_state=0)
