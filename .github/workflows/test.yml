@@ -8,16 +8,48 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install
-        run: python -m pip install -e ".[dev]"
+        run: python -m pip install -e ".[dev,experiments]"
       - name: Ruff
         run: ruff check .
       - name: Ruff format
         run: ruff format --check .
       - name: Tests
         run: python -m pytest
+
+  minimum-versions:
+    # The package imports scikit-learn internals (_fit_context, _param_validation), so the
+    # declared lower bounds are tested explicitly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install oldest supported dependencies
+        run: |
+          python -m pip install "numpy==1.24.*" "scipy==1.10.*" "scikit-learn==1.6.*" pytest
+          python -m pip install -e . --no-deps
+      - name: Tests
+        run: python -m pytest
+
+  continual-learning-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Verify the continual-learning claims still hold on digits
+        run: python -m experiments.continual_eval --dataset digits --fail-on-verdict --output /tmp/ce.json

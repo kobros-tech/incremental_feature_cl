@@ -151,7 +151,7 @@ The math reference checks zero-initialised expansion invariance and the explicit
 
 ## What the experiments do and do not establish
 
-The tests cover the estimator API, deterministic behaviour, finite-difference gradient checks, zero-initialised expansion, replay, target/negative sampling, and the small experiment pipeline. A gradient check verifies that the implementation's gradients match its implemented loss; it does not establish parity with the previous PyTorch or scikit-learn implementation.
+The tests cover the estimator API, deterministic behaviour, finite-difference gradient checks, zero-initialised expansion, replay, target/negative sampling, chunked inference, divergence and class-consistency errors, the small experiment pipeline, and the continual-learning evaluation (metrics against hand calculations, memory accounting and the verdict logic). A gradient check verifies that the implementation's gradients match its implemented loss; it does not establish parity with the previous PyTorch or scikit-learn implementation.
 
 Do not compare results without recording the seed, experience construction, target class, ratio, replay capacity, training settings, and evaluation metric. In particular, zero-initialised expansion guarantees score continuity only at the expansion boundary; subsequent optimisation can still alter old predictions.
 
@@ -167,3 +167,148 @@ Do not compare results without recording the seed, experience construction, targ
   (`memory_*_added`).
 - `decision_function` accepts `float32` input and converts it chunk by chunk, so
   `inference_batch_size` also bounds input-preparation memory.
+
+## Evidence of continual learning
+
+`python -m experiments.continual_eval --dataset digits` runs a class-incremental stream (every
+class arrives once, class order shuffled per seed) for four methods on identical seeds:
+
+- `naive`: no replay.
+- `replay`: the package default.
+- `joint`: one offline fit on all data, no feature expansion.
+- `joint_matched`: offline training on all data with the same expansion schedule and number of
+  passes as the stream, so model capacity is matched.
+
+After each experience it scores every class seen so far and reports, per class, **recall**,
+**specificity**, **accuracy** (arg-max over seen classes) and **AUC**, summarised as final value,
+value at arrival, average incremental value, forgetting and backward transfer. Recall is never
+read alone: specificity and balanced accuracy show whether recall was bought by over-predicting
+the class, and AUC separates threshold drift from loss of ranking information.
+
+**Memory accounting.** `OneVsRestClassifier` gives every class its own replay memory, so total
+memory is `replay_mem_size x n_classes`, not `replay_mem_size`. The evaluation therefore sets
+the budget as a share of the training set (`--memory-fraction`, default 0.25), derives the
+per-class-model size from it, and reports the rows actually retained. `--replay-mem-size` sets
+the per-class-model size directly. A gating criterion requires replay to retain less than the
+whole training set. With the earlier per-model size of 200 on `digits`, replay held 2,000 rows
+from 1,347 training rows, so that setting does not demonstrate bounded memory.
+
+**Verdict.** `replay` is compared with `naive` on paired per-seed differences with a 95%
+Student-t interval. Gating criteria: lower recall forgetting, higher final recall, higher final
+accuracy, higher final balanced accuracy, balanced accuracy at arrival not worse than
+`--plasticity-margin` (default 0.05), final balanced accuracy within `--joint-margin` (default
+0.15) of `joint`, and replay retaining less than the training set. Recall and AUC at arrival and
+the gap to `joint_matched` are reported as non-gating rows. `--fail-on-verdict` makes the command
+exit 1 if a gating criterion fails; CI runs it on `digits`.
+
+### Running it with plots
+
+```bash
+python -m pip install -e ".[dev,experiments]"      # experiments extra installs matplotlib
+
+# 1. run the evaluation (saves the JSON, prints the tables and the verdict)
+python -m experiments.continual_eval --dataset digits --output results/continual_eval_digits.json
+
+# 2. plot the saved JSON; this does not retrain anything
+python -m experiments.plot_results \
+  --results results/continual_eval_digits.json --output-dir results/continual_plots
+```
+
+Plots written to `--output-dir`: `recall_over_experiences.png` and `accuracy_over_experiences.png`
+(mean over classes seen so far, mean and standard deviation over seeds, all methods),
+`recall_matrix_naive.png` and `recall_matrix_replay.png` (recall of each arrival group after each
+experience; values below the diagonal are forgetting), and `summary_bars.png` (final recall,
+specificity, accuracy and recall forgetting per method). Use `--dataset synthetic` for the
+harder stream, `--seeds 0 1 2 3 4 5 6 7` for tighter intervals, or `--memory-fraction 0.1` to
+shrink the replay budget.
+
+Results of the command above (full JSON in `results/`):
+
+### `digits` (5 seeds, 5 experiences)
+
+| metric | naive | replay | joint | joint_matched |
+| --- | --- | --- | --- | --- |
+| final recall | 0.557 ± 0.058 | 0.935 ± 0.009 | 0.981 ± 0.003 | 0.973 ± 0.001 |
+| final specificity | 0.955 ± 0.007 | 0.972 ± 0.005 | 0.960 ± 0.003 | 0.992 ± 0.001 |
+| final accuracy | 0.561 ± 0.033 | 0.914 ± 0.010 | 0.956 ± 0.009 | 0.974 ± 0.008 |
+| final AUC | 0.893 ± 0.014 | 0.989 ± 0.001 | 0.995 ± 0.001 | 0.998 ± 0.000 |
+| recall at arrival | 0.983 ± 0.004 | 0.974 ± 0.007 | 0.981 ± 0.003 | 0.973 ± 0.001 |
+| recall forgetting | 0.533 ± 0.071 | 0.051 ± 0.008 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| recall backward transfer | -0.533 ± 0.071 | -0.049 ± 0.009 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| accuracy forgetting | 0.531 ± 0.039 | 0.083 ± 0.012 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| avg incremental recall | 0.798 ± 0.025 | 0.960 ± 0.017 | 0.983 ± 0.011 | 0.973 ± 0.015 |
+| avg incremental accuracy | 0.767 ± 0.039 | 0.948 ± 0.020 | 0.957 ± 0.020 | 0.974 ± 0.010 |
+| rows retained (all class models) | 0.000 ± 0.000 | 320.000 ± 0.000 | 1347.000 ± 0.000 | 1347.000 ± 0.000 |
+| fraction of training set retained | 0.000 ± 0.000 | 0.238 ± 0.000 | 1.000 ± 0.000 | 1.000 ± 0.000 |
+
+| criterion (replay vs naive, paired) | mean diff | 95% CI | passed |
+| --- | --- | --- | --- |
+| retention_recall_forgetting_lower_than_naive | -0.482 | [-0.575, -0.390] | yes |
+| final_recall_higher_than_naive | +0.378 | [+0.308, +0.448] | yes |
+| final_accuracy_higher_than_naive | +0.353 | [+0.321, +0.385] | yes |
+| recall_not_bought_with_specificity | +0.197 | [+0.164, +0.231] | yes |
+| still_learns_new_classes | +0.021 | [+0.014, +0.029] | yes |
+| info_recall_at_arrival (not gating) | -0.009 | [-0.014, -0.004] | yes |
+| info_auc_at_arrival (not gating) | +0.002 | [-0.002, +0.006] | yes |
+| replay_stores_less_than_the_training_set | +0.238 | [+0.238, +0.238] | yes |
+| info_gap_to_capacity_matched_joint (not gating) | +0.029 | [+0.024, +0.034] | yes |
+| within_margin_of_joint_training | +0.017 | [+0.013, +0.022] | yes |
+
+All gating criteria passed: True
+
+### `synthetic` (5 seeds, 5 experiences)
+
+| metric | naive | replay | joint | joint_matched |
+| --- | --- | --- | --- | --- |
+| final recall | 0.358 ± 0.056 | 0.756 ± 0.036 | 0.928 ± 0.022 | 0.951 ± 0.011 |
+| final specificity | 0.908 ± 0.007 | 0.927 ± 0.007 | 0.873 ± 0.014 | 0.959 ± 0.007 |
+| final accuracy | 0.375 ± 0.049 | 0.748 ± 0.021 | 0.812 ± 0.028 | 0.924 ± 0.017 |
+| final AUC | 0.872 ± 0.022 | 0.945 ± 0.010 | 0.958 ± 0.010 | 0.988 ± 0.002 |
+| recall at arrival | 0.980 ± 0.007 | 0.932 ± 0.021 | 0.928 ± 0.022 | 0.951 ± 0.011 |
+| recall forgetting | 0.746 ± 0.067 | 0.211 ± 0.034 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| recall backward transfer | -0.746 ± 0.067 | -0.211 ± 0.034 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| accuracy forgetting | 0.731 ± 0.057 | 0.235 ± 0.019 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| avg incremental recall | 0.624 ± 0.027 | 0.844 ± 0.013 | 0.938 ± 0.016 | 0.956 ± 0.011 |
+| avg incremental accuracy | 0.640 ± 0.022 | 0.854 ± 0.012 | 0.820 ± 0.020 | 0.927 ± 0.020 |
+| rows retained (all class models) | 0.000 ± 0.000 | 444.000 ± 0.000 | 1800.000 ± 0.000 | 1800.000 ± 0.000 |
+| fraction of training set retained | 0.000 ± 0.000 | 0.247 ± 0.000 | 1.000 ± 0.000 | 1.000 ± 0.000 |
+
+| criterion (replay vs naive, paired) | mean diff | 95% CI | passed |
+| --- | --- | --- | --- |
+| retention_recall_forgetting_lower_than_naive | -0.535 | [-0.626, -0.445] | yes |
+| final_recall_higher_than_naive | +0.398 | [+0.336, +0.461] | yes |
+| final_accuracy_higher_than_naive | +0.374 | [+0.332, +0.416] | yes |
+| recall_not_bought_with_specificity | +0.208 | [+0.179, +0.238] | yes |
+| still_learns_new_classes | +0.031 | [+0.022, +0.041] | yes |
+| info_recall_at_arrival (not gating) | -0.048 | [-0.068, -0.028] | NO |
+| info_auc_at_arrival (not gating) | -0.011 | [-0.018, -0.005] | yes |
+| replay_stores_less_than_the_training_set | +0.247 | [+0.247, +0.247] | yes |
+| info_gap_to_capacity_matched_joint (not gating) | +0.114 | [+0.100, +0.128] | yes |
+| within_margin_of_joint_training | +0.059 | [+0.045, +0.074] | yes |
+
+All gating criteria passed: True
+
+How to read these results:
+
+- Replay retains what naive training loses (recall forgetting 0.05 vs 0.53 on `digits`) without
+  giving up specificity, while keeping about a quarter of the training rows.
+- Retention is incomplete on the harder `synthetic` stream, and replay trails capacity-matched
+  joint training (the `info_gap_to_capacity_matched_joint` row). Reducing the budget degrades
+  results gradually; on `digits`, 15% retained gave final recall about 0.91 and 7% about 0.83.
+- Replay costs some plasticity. On `synthetic` its recall at arrival is below naive's (about
+  -0.05), because naive's higher arrival recall comes with much lower specificity. Plasticity is
+  therefore gated on balanced accuracy, not raw recall.
+- Both datasets are small and low-dimensional, and the intervals cover 5 seeds. These results do
+  not show the same behaviour on real CIFAR-100; run
+  `--dataset cifar100 --max-classes 20 --seeds 0 1 2` (or pass a CIFAR directory path) before
+  making that claim.
+
+## Behaviour notes
+
+- Training that produces non-finite parameters raises `ValueError`. A finite but poor run (a
+  learning rate too high for the input scale) is not detected.
+- A later `partial_fit(..., classes=...)` that differs from the first call raises `ValueError`.
+- `OneVsRestClassifier` clones the estimator with the same integer `random_state`, so all class
+  models share the same random feature blocks. Use `random_state=None` to decorrelate them.
+- Supported minimums (Python 3.10, NumPy 1.24, SciPy 1.10, scikit-learn 1.6) are tested in CI;
+  the package uses scikit-learn internals, so newer scikit-learn releases should be checked.

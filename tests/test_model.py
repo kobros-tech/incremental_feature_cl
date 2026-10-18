@@ -649,3 +649,37 @@ def test_store_in_memory_mask_trains_but_does_not_store():
     assert d["memory_total"] == 10
     with pytest.raises(ValueError, match="store_in_memory"):
         Model().partial_fit(X, y, classes=[0, 1], store_in_memory=mask[:5])
+
+
+def test_later_partial_fit_rejects_inconsistent_classes():
+    rng = np.random.RandomState(2)
+    X, y = rng.rand(30, 4), np.array([0, 1] * 15)
+    model = Model(n_epochs=1).partial_fit(X, y, classes=[0, 1])
+    model.partial_fit(X, y, classes=[0, 1])  # consistent: accepted
+    with pytest.raises(ValueError, match="differs from the classes_"):
+        model.partial_fit(X, y, classes=[3, 4])
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_divergent_training_raises_instead_of_returning_nan_model():
+    rng = np.random.RandomState(3)
+    X, y = rng.rand(40, 4) * 1e154, np.array([0, 1] * 20)
+    with pytest.raises(ValueError, match="diverged"):
+        Model(learning_rate_init=1e300, n_epochs=2).fit(X, y)
+
+
+@pytest.mark.parametrize("dtype", [np.float16, np.int32, np.float32])
+def test_decision_function_converts_any_numeric_dtype_chunkwise(dtype):
+    import tracemalloc
+
+    rng = np.random.RandomState(4)
+    model = Model(new_feature_dim=2, n_epochs=1, inference_batch_size=16, random_state=0).fit(
+        rng.rand(60, 32), np.array([0, 1] * 30)
+    )
+    X = (rng.rand(2000, 32) * 8).astype(dtype)
+    tracemalloc.start()
+    scores = model.decision_function(X)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 0.5 * X.size * 8
+    np.testing.assert_allclose(scores, model.decision_function(X.astype(np.float64)), rtol=1e-6)

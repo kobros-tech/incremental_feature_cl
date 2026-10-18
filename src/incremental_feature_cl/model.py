@@ -111,7 +111,14 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
 
     Notes
     -----
-    Scale the features (e.g. ``StandardScaler``) before use; the optimiser is plain SGD.
+    Scale the features (e.g. ``StandardScaler``) before use; the optimiser is plain SGD.  Training
+    that produces non-finite parameters raises ``ValueError``; a finite but poor run (learning
+    rate too high for the input scale) is not detected, so check the loss-driven metrics.
+
+    ``OneVsRestClassifier`` clones this estimator once per class with the same ``random_state``,
+    so every class model draws identical feature blocks.  Pass ``random_state=None`` to
+    decorrelate them (at the cost of reproducibility).  Each class model also keeps its own
+    replay memory: total memory is ``replay_mem_size * n_classes``.
 
     Attributes
     ----------
@@ -255,6 +262,11 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
             self.coef_ = np.zeros((1, self.n_features_in_))  # zero initialisation
             self.intercept_ = np.zeros(1)
             self.feature_dim_ = self.n_features_in_
+        elif classes is not None and not np.array_equal(np.unique(classes), self.classes_):
+            raise ValueError(
+                f"classes={np.unique(classes).tolist()} differs from the classes_="
+                f"{self.classes_.tolist()} fixed by the first partial_fit call."
+            )
         if not np.isin(y, self.classes_).all():
             raise ValueError(f"y contains labels outside classes_={self.classes_.tolist()}")
 
@@ -266,6 +278,11 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         if not first:
             self.expand_features()
         self._train(X, pos, weight, *self._replay_pool())
+        if not all(np.isfinite(p).all() for p in self._params()):
+            raise ValueError(
+                "Training diverged (non-finite parameters). Lower learning_rate_init or "
+                "standardise the input features; the estimator state is no longer usable."
+            )
         mem_before = [len(m) for m in self._mem]
         self._update_memory(X[store], pos[store])
         self.last_fit_diagnostics_.update(
@@ -435,11 +452,16 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
 
         Transform rows in bounded batches so evaluation does not materialize the
         expanded feature matrix for the entire test set at once.
+
+        Memory bound: temporaries scale with ``inference_batch_size``; the caller's input and the
+        returned score vector (``n_samples`` floats) are held in full.  Numeric input of any dtype
+        is converted to ``float64`` one chunk at a time, never as a whole.
         """
         check_is_fitted(self, "classes_")
-        # Accept float32 as-is: converting the whole input to float64 up front would allocate
-        # a full-size copy and defeat ``inference_batch_size``.  Each chunk is converted below.
-        X = validate_data(self, X, reset=False, dtype=(np.float64, np.float32))
+        # Keep the caller's numeric dtype (float32, float16, integer, ...): converting the whole
+        # input to float64 up front would allocate a full-size copy and defeat
+        # ``inference_batch_size``.  Each chunk is converted to float64 below.
+        X = validate_data(self, X, reset=False, dtype="numeric")
         batch_size = self.inference_batch_size
         scores = np.empty(len(X), dtype=np.float64)
         for start in range(0, len(X), batch_size):
