@@ -206,6 +206,7 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
             "_rng",
             "_mem",
             "_mem_seen",
+            "_balanced_pos_weight_",
         ):
             self.__dict__.pop(name, None)
 
@@ -312,11 +313,13 @@ class IncrementalFeatureMapModel(ClassifierMixin, BaseEstimator):
         if isinstance(self.pos_weight, str):  # "balanced"
             n_pos = int(pos.sum())
             n_neg = int((~pos).sum())
-            # A one-class experience must not make its only observed class almost weightless.
-            # There is no within-batch class ratio to balance in this case.
-            if n_pos == 0 or n_neg == 0:
-                return 1.0
-            return n_neg / n_pos
+            if n_pos > 0 and n_neg > 0:
+                self._balanced_pos_weight_ = n_neg / n_pos
+                return self._balanced_pos_weight_
+            # Before both classes have appeared together there is no useful ratio. Once
+            # learned, retain the last valid weight so replayed positives stay weighted
+            # during later negative-only experiences.
+            return getattr(self, "_balanced_pos_weight_", 1.0)
         return float(self.pos_weight)
 
     def _replay_pool(self):
