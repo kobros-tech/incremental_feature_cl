@@ -1,355 +1,341 @@
 # incremental-feature-cl
 
-A standalone research package that tests one hypothesis:
+A small scikit-learn-compatible **binary** classifier for experiments with incremental feature expansion and replay. The installed package contains the estimator, not dataset loaders, continual-learning orchestration, plotting, or benchmark code.
 
-> A continual learner can be given additional discriminative feature capacity incrementally, while the
-> classifier contribution of each new block is initialised to **zero**. This guarantees continuity at the
-> expansion boundary; optional freezing controls can be used when an experiment requires the previously
-> learned representation itself to remain fixed.
-
-**Status: experimental. No claim is made that the method works.** The package establishes (and tests) the
-*mechanism*; whether it helps on Split CIFAR-100 is what the experiments are for.
-
-Theory: [MIT 6.86x Lecture 6](https://github.com/kobros-tech/6.86x/tree/2025/unit_2/lecture_6) (feature maps,
-kernels, kernel perceptron). Architecture is inspired by (but does **not** depend on) the OCL Survey and
-Skill Memory repositories. Avalanche is an optional integration layer.
-
-```text
-6.86x maths -> math/ (feature maps, kernels, perceptron) -> models/ (expandable feature model)
-            -> training/ (plain PyTorch)  ->  avalanche/ (optional adapter) -> Split CIFAR-100
-```
+The hypothesis under study is narrow: append a feature block while initialising its classifier coefficients to zero. Immediately after expansion, scores are unchanged:
+`Phi_new(x) = [Phi_old(x), psi(x)]` and `theta_new = [theta_old, 0]`.
+This continuity property does **not** guarantee that later training prevents forgetting.
 
 ## Install
 
 ```bash
-pip install -e .                      # numpy, torch, pyyaml, matplotlib
-pip install -e ".[vision]"            # + torchvision (CIFAR-10/100 download)
-pip install -e ".[avalanche,dev]"     # + avalanche-lib, pytest, ruff
-pytest                                # CPU, no downloads
+pip install -e ".[dev]"
+pytest
 ```
 
-## Commands
+For plots, install the optional experiment dependencies:
 
 ```bash
-# 1a. The Lecture-6 mathematics (no neural net): expansion invariance + kernel identities
-python -m incremental_feature_cl.experiments.math_demo
-
-# 1b. Smallest neural experiment (synthetic data, CPU, seconds). zero vs random expansion
-python -m incremental_feature_cl.experiments.synthetic_demo            # --mode target for target-vs-rest
-
-# 2. Split CIFAR-100, 5 experiences (first real milestone)
-python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
-    --n-experiences 5 --new-feature-dim 16 --train-epochs 5 --seed 1
-
-# 3. Target class 17 vs the rest, 20 experiences
-python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \
-    --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1
-
-# 3b. Same, with an explicit target:negative ratio (0.2 = 1 target : 5 negatives; omit = cumulative negatives)
-python -m incremental_feature_cl.experiments.train_target --dataset cifar100 \
-    --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 \
-    --target-to-negatives 0.2
-
-# 3c. Sweep the target:negative ratio 5:1 ... 1:5 (+ cumulative reference) for one or more targets
-python -m incremental_feature_cl.experiments.compare_ratios --dataset cifar100 \
-    --target-class 17 --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --yes
-python -m incremental_feature_cl.experiments.compare_ratios --target-class 0 17 50 99 --dry-run
-#     rebuild a finished sweep's tables/plots from its saved runs (no training, no dataset):
-python -m incremental_feature_cl.experiments.compare_ratios --resummarize results/<sweep-dir>
-
-# 4. Full 20-experience class-incremental benchmark (20 x 5 classes)
-python -m incremental_feature_cl.experiments.train_cifar100 --dataset cifar100 \
-    --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1
-#    same benchmark through Avalanche (SplitCIFAR100 + IncrementalFeatureSpaceStrategy):
-#    add --backend avalanche
-
-# 5. Ablation: fixed / fixed+replay / expand-random / expand-zero / expand-zero+replay (+ Avalanche refs)
-python -m incremental_feature_cl.experiments.compare_baselines --dataset cifar100 --n-experiences 5 \
-    --new-feature-dim 16 --replay 200 --avalanche-baselines naive,replay,er_ace,ewc
-
-# 6. Matrix {5,10,20} x {0,4,16,32} x {zero,random}  -- prints the plan; needs --yes to run
-python -m incremental_feature_cl.experiments.run_sweep --preset cifar100-matrix --dry-run
-
-# 7. Several / all target classes (prints an estimate; needs --yes)
-python -m incremental_feature_cl.experiments.train_target --target-class 0 17 50 99 --yes
-python -m incremental_feature_cl.experiments.train_target --target-class all --dry-run
-
-# Regenerate plots from a saved result, no retraining
-python -m incremental_feature_cl.plotting --results results/<run>/results.json
+pip install -e ".[experiments]"
 ```
 
-Every script takes `--config configs/*.yaml`, any `--set section.key=value`, `--device auto|cpu|cuda`.
-Run order recommended: synthetic -> CIFAR-10/small subset -> CIFAR-100 x5 -> x20 -> zero vs random -> baselines.
+Runtime dependencies are NumPy, SciPy, and scikit-learn. PyTorch and Avalanche are not package dependencies. The digits and synthetic experiments need no downloads. For CIFAR-100, `--dataset cifar100` downloads the official archive on first use, verifies its checksum, and caches it under `data/`; `--dataset /path/to/cifar-100-python` uses an already-extracted official Python dataset directory, and `--dataset /path/to/cifar-100-python.tar.gz` uses a local tar archive. The archive must contain `cifar-100-python/train` and `cifar-100-python/test`. In each case, it samples up to 100 training and 20 test images per class for a reproducible lightweight run.
 
-## Mathematical Motivation
-
-**Feature maps (Lecture 6).** A linear classifier cannot separate `x = -1, 0, 1` with labels `+1, -1, +1`.
-Apply a feature map `x -> Phi(x) = (x, x^2)` and the *same* linear machinery works: the decision
-`theta . Phi(x) + b >= 0` is linear in feature space and nonlinear in `x`.
-
-```text
-x  ->  Phi(x)  ->  linear classifier  f(x) = W Phi(x) + b
-```
-
-**Incremental expansion.** Instead of a fixed `Phi`, grow it by appending a block:
-
-```text
-Phi_{t+1}(x) = [ Phi_t(x) , psi_{t+1}(x) ]          W_{t+1} = [ W_t , 0 ]
-```
-
-Then, immediately after expansion and before any optimisation step,
-
-```text
-f_{t+1}(x) = W_t Phi_t(x) + 0 * psi_{t+1}(x) + b = f_t(x)        for every x
-```
-
-so expansion itself cannot damage old predictions (verified numerically: `tests/test_zero_initialization.py`,
-and recorded as `logit_max_abs_diff_expansion` in every run). The gradient of the loss with respect to
-`W_new` is `dL/dlogits (x) psi_new(x)^T`, which is generally non-zero, so gradient descent *can* make
-`W_new` non-zero when the new capacity is useful (`tests/test_gradient_activation.py`). One honest subtlety: at
-exactly `W_new = 0` the gradient w.r.t. the parameters *inside* `psi_new` is zero, so `psi` only starts to learn
-after `W_new` has moved (tested and documented).
-
-**What this is not.** It is an experimental hypothesis, **not a theorem** that zero initialisation solves
-catastrophic forgetting. Zero initialisation guarantees continuity at the expansion instant only. With the
-default trainable-backbone/trainable-old-blocks setting, subsequent optimisation can still change the old
-representation and classifier. For strict stability experiments, use `freeze_backbone=true` and/or
-`freeze_old_blocks=true`; these are explicit controls, not hidden behaviour. Results record the chosen
-settings so an experiment can be audited later.
-
-## Kernel interpretation
-
-`K(x, z) = <Phi(x), Phi(z)>`. The lecture's degree-2 map `(1, sqrt2 x1, sqrt2 x2, x1^2, x2^2, sqrt2 x1 x2)` satisfies
-`Phi(x).Phi(z) = (1 + x.z)^2`; `math.PolynomialFeatureMap(degree, kernel_scaled=True)` reproduces this exactly
-and is block-structured by degree, `Phi_p = [Phi_{p-1}, psi_p]` - the same incremental shape as the neural
-model. `math/` also has `polynomial_kernel`, `rbf_kernel`, a feature-space `Perceptron` that can be expanded
-with `theta' = [theta, 0]`, and the dual `KernelPerceptron` (tested equal to the explicit version).
-
-**The neural model does not implement the kernel trick.** It uses an *explicit learned* feature map
-(`backbone -> psi blocks`). A kernel extension `K_{t+1} = K_t + lambda K_new` is a possible future study and is
-deliberately not implemented. Raw-pixel polynomial expansion on CIFAR (3072 dims) is never attempted.
-
-## Model components (`src/incremental_feature_cl`)
-
-| Module | Role |
-| --- | --- |
-| `math/` | Reference maths: `PolynomialFeatureMap`, kernels, `Perceptron` (expandable), `KernelPerceptron`. |
-| `models/feature_map.py` | `FeatureBlock`: `psi(h) = act(Linear(h))` on the backbone vector `h` (own params random). |
-| `models/classifier.py` | `ExpandableLinearClassifier`: `logits = b + sum_k W_k phi_k`. `add_block` (feature axis) and `expand_outputs` (class axis) are independent. |
-| `models/backbones.py` | `slimresnet18`, `smallconv`, `mlp`, `identity`; only `out_dim` matters to the expansion mechanism. |
-| `models/incremental_model.py` | `IncrementalFeatureMapModel`: `expand_feature_space(new_dim, initialization)`, `expand_outputs(n)`, `ensure_outputs(n)`, diagnostics (`classifier_block_norms`, `block_contribution`), optional `freeze_backbone` / `freeze_old_blocks`. |
-| `training/policy.py` | `ExpansionPolicy`: when/how much to grow (shared by trainer and Avalanche plugin). |
-| `training/trainer.py` | `ContinualTrainer`: probe before expansion -> expand -> probe -> grow outputs -> train -> probe -> evaluate. |
-| `training/replay.py` | Minimal class-balanced buffer for *controlled ablations only* (not a replacement for Avalanche's methods). |
-| `data/` | Committed synthetic/CIFAR loaders, `ArrayDataset`, and deterministic class-incremental/target-vs-rest streams. |
-| `evaluation/` | Per-class accuracy, forgetting, target metrics, `RunResult` (json/csv). |
-| `plotting/` | Plots A-H, regenerated from `results.json`. |
-| `avalanche/` | `FeatureExpansionPlugin`, `IncrementalFeatureSpaceStrategy`, benchmark builders, Avalanche baselines. |
-| `experiments/` | CLIs listed above + `config.py`, `common.py`. |
-
-Design choices worth knowing: `psi_t` takes the backbone vector `h` (not the whole `Phi_{t-1}`); one shared
-classifier bias (new blocks have no own bias, so "zero bias" is automatic); the optimizer is **rebuilt at every
-experience** (needed when shapes/params change; same for all variants); `new_feature_dim=0` is the fixed baseline; feature growth starts at experience 1; output growth is
-zero-initialised by default and independent of feature growth. `freeze_backbone` and `freeze_old_blocks`
-are explicit stability/plasticity controls and default to `false`.
-
-## Two experiments, deliberately separate
-
-* **Mode A - target-vs-rest** (`train_target.py`): one binary logit answers "is this class K?". Experience `t`
-  trains on all target samples + the **cumulative** pool of every negative class introduced so far
-  (`0..t`; target data re-appears each experience, `--no-target-in-every-experience` changes that), so the
-  classifier keeps seeing a growing negative space and the negative/positive ratio grows with `t`. Evaluation
-  uses the same negative set. Loss: BCE with `pos_weight = n_neg / n_pos` of the experience
-  (`train.pos_weight`; set `null` to disable). The data ratio can be controlled explicitly, see below.
-* **Mode B - multiclass class-incremental** (`train_cifar100.py`): standard CIL, softmax head grown as classes
-  appear. A binary target classifier is **not** a 100-class classifier; no one-vs-rest ensemble is implemented.
-
-### Target-vs-rest negative ratio (`target_to_negatives`)
-
-An experimental control for studying the effect of cumulative negative imbalance. It sets how many negatives
-accompany the target samples in each training experience; it changes the **data stream only** and never the loss
-(`train.pos_weight` stays as configured, so data ratio and loss weighting can be varied independently).
-
-| `target_to_negatives` | Meaning | Negatives per experience |
-| --- | --- | --- |
-| `None` (default) | cumulative behaviour, no subsampling | the whole pool (grows with `t`) |
-| `1.0` | 1 target : 1 negative | `n_target` |
-| `0.5` | 1 target : 2 negatives | `2 * n_target` |
-| `0.2` | 1 target : 5 negatives | `5 * n_target` |
-| `0.1` | 1 target : 10 negatives | `10 * n_target` |
-| `2.0` | 2 targets : 1 negative | `n_target / 2` |
-
-Rules: the value is *targets per negative*, so `n_negative = floor(n_target / target_to_negatives)`. All target
-samples are always kept (never subsampled or duplicated); negatives are drawn without replacement from the
-cumulative pool, deterministically from `seed` and the experience index; if the pool is smaller than requested
-(early experiences) all of it is kept.
-
-**Requested vs realized ratio.** `target_to_negatives` is a *requested upper bound on negatives per target*.
-Negatives are never duplicated (duplicating them would add a second confound), so while the cumulative negative
-pool is smaller than requested an experience trains on fewer negatives than asked: requested 1:5 may train at
-1:3 in experience 0 and at 1:5 from experience 1 on. Both are recorded for every experience in `results.json` /
-`metrics.csv`: `requested_target_to_negatives`, `n_requested_negative`, `n_train_target`, `n_train_negative`,
-`realized_target_to_negatives` (targets per negative), `realized_ratio_label` (e.g. `1:3`) and `ratio_satisfied`
-(`null` when there is nothing to enforce: cumulative mode, or an experience without target samples). Whether this
-matters depends on the setup: Split CIFAR-100 with 20 experiences has 5 negative classes (2,500 images) in
-experience 0, so 1:5 is reached from the very first experience (exactly), 1:10 from experience 1, 1:20 from
-experience 3; with 5 experiences the pool is 20 classes and every ratio up to 1:20 is reached immediately.
-`compare_ratios` prints this before running (see below) so a headline ratio is never misleading. With `--no-target-in-every-experience`, experiences without target samples
-keep the whole pool. Non-positive/non-finite values (and ratios so large that zero negatives would be requested)
-raise `ValueError`; the flag is rejected outside target mode. Experiment names get a `_r<ratio>` suffix (e.g.
-`..._r0.2_s1`) when a ratio is set; `None` keeps the previous names. The value is stored in `results.json`.
-
-```bash
-python -m incremental_feature_cl.experiments.train_target --dataset cifar100 --target-class 17 \
-    --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --target-to-negatives 0.2
-# sweep the ratio (null = original cumulative behaviour); prints the plan, needs --yes to run
-python -m incremental_feature_cl.experiments.run_sweep --mode target --target-class 17 --dataset cifar100 \
-    --grid target_to_negatives=null,0.1,0.2,0.5,1 --dry-run
-```
-
-No ratio is claimed to be optimal; this only makes the ratio an experimental variable. In earlier runs of this
-repository, `0.2` corresponds to the 1:5 behaviour that used to be hardcoded (selected samples are identical).
-
-### Sweeping the ratio (`compare_ratios`)
-
-Runs the same target-vs-rest experiment once per ratio, for one or more target classes, and summarises
-the trade-off. Ratios are written `target:negative`: `5:1` = 5 targets per negative, `1:5` = 1 target per 5
-negatives. Default grid: `5:1 2:1 1:1 1:2 1:5` plus `cumulative` (the original un-subsampled behaviour) as a
-reference; choose your own with `--ratios 5:1 1:1 1:5` (numbers and `cumulative` also work; `--no-cumulative`
-drops the reference).
-
-```bash
-python -m incremental_feature_cl.experiments.compare_ratios --dataset cifar100 --target-class 17 \
-    --n-experiences 20 --new-feature-dim 16 --train-epochs 5 --seed 1 --dry-run   # plan + sample counts
-... same command with --yes to run it
-... --target-class 0 17 50 99 --yes            # several targets; mean/std across targets are reported
-... --target-class all --yes                   # every class (prints the plan first; large!)
-... --ratios 5:1 1:1 1:5 --pos-weights balanced none --yes
-... --config configs/ratio_sweep.yaml --yes
-```
-
-* **Safe by default:** like `run_sweep`, it prints the plan (runs, training samples per ratio) and only runs
-  with `--yes` (`--dry-run` never runs). The plan also states, per ratio, in how many experiences the requested
-  ratio is actually reached (and the realized ratio of the shortfall). Sweeps of 50+ runs print a `WARNING`:
-  `--target-class all` on CIFAR-100 with the default grid is 600 runs (1,200 with two loss settings).
-* **Loss weighting is a confound, so it is an axis.** With the default `train.pos_weight=balanced` the loss
-  gives positives and negatives equal total weight whatever the data ratio (`pos_weight = n_neg / n_pos`, from
-  the *realized* counts of each experience), so the sweep then isolates *how many / how varied* the negatives are
-  while their aggregate loss contribution is normalised. `--pos-weights balanced none` runs both settings so the
-  effect of class imbalance in the loss can be separated from the data ratio: it is a second experimental axis
-  (results are tagged `__pw-<w>`), not an implementation detail. A non-default weighting is always part of the
-  run directory name, so it can never overwrite the `balanced` runs. The loss is never changed implicitly.
-* **Resumable:** a run whose saved `results.json` has an identical config is reused (`--no-resume`
-  recomputes), so an interrupted CIFAR-100 sweep can be restarted with the same command. Everything that
-  influences training (lr, seed, ratio, target, loss weighting, model, data, device, ...) is
-  compared. Only the run's storage metadata (`name`, `output_dir`) is ignored, so a moved sweep is not recomputed. A run that is
-  replaced because its config changed is announced. `results.json` is written atomically, so an interrupted
-  run is never mistaken for a finished one. Keep one sweep per output directory (change `--name` /
-  `--output-dir` when you change settings such as epochs or learning rate).
-* **Re-summarisable:** `--resummarize <sweep-dir>` rebuilds every table and plot from the saved runs without
-  training or a dataset (and warns if the directory mixes runs made with different settings).
-* **Verifiable:** every experience records `n_train_target` / `n_train_negative`, so the realized ratio is in
-  `results.json`/`metrics.csv` (not only the requested one).
-
-Outputs in `<output-dir>/<name>/` (name defaults to `ratio_sweep_<dataset>_e<n>_d<dim>_<init>_s<seed>`):
-
-| File | Content |
-| --- | --- |
-| `ratio_sweep_runs.csv` | one row per run: target, **requested** ratio (`ratio`, `ratio_label`), loss weighting, final/average metrics, and the realized ratio (`final_realized_ratio_label`, `final_negatives_per_target`, `mean_negatives_per_target`, `fraction_experiences_at_requested_ratio`, `first_experience_at_requested_ratio`) |
-| `ratio_sweep_by_ratio.csv` | mean and std across targets for each ratio (and loss setting) |
-| `ratio_sweep.json` | plan, config, environment, both tables, `ratio_semantics` |
-| `ratio_sweep_main.png` | headline figure: balanced accuracy (final / mean over experiences) vs requested ratio, and realized vs requested negatives per target (points below the diagonal = pool too small) |
-| `ratio_sweep_final_metrics.png` | final target recall / negative accuracy, balanced accuracy, F1 / false-positive rate, forgetting vs ratio (thin lines = individual targets) |
-| `ratio_curves.png` | per-experience target recall, negative accuracy and balanced accuracy, one line per ratio (mean over targets); `ratio_curves__pw-<w>.png` per loss setting |
-| `runs/ratio_<r>/target_<k>/` | the normal per-run `results.json`, `metrics.csv`, `per_class_accuracy.csv` (plots only with `--run-plots`; regenerate any time with `python -m incremental_feature_cl.plotting`) |
-
-Metrics: *negative accuracy* is measured on the negative classes seen so far; *balanced accuracy* =
-(target recall + negative accuracy) / 2 (overall binary accuracy depends on the test-set class mix, so use
-balanced accuracy to compare ratios); *target recall peak->final drop* (`target_recall_peak_to_final_drop`) =
-max earlier target recall - final target recall. It is exactly the standard per-class forgetting of the target
-class (tested), so it is measured against the *peak*: a model that dipped and partly recovered still reports
-the drop from its best earlier recall, and a negative value means the final recall is the best so far. It says
-nothing about the negative classes; `average_forgetting` is the mean forgetting over *all* classes (it was
-called `target_recall_drop` before). `average_*` metrics average over experiences and therefore mix experiences
-that reached the requested ratio with ones that did not; use `final_*` (or check
-`fraction_experiences_at_requested_ratio`) when comparing ratios.
-The synthetic dataset is a plumbing check only (and the `smallconv` backbone cannot learn it because of global
-pooling; use `--backbone mlp` there); conclusions about ratios need CIFAR-100 runs.
-
-## Avalanche integration
+## Use as a binary estimator or with OneVsRestClassifier
 
 ```python
-model = IncrementalFeatureMapModel(build_backbone("slimresnet18"), num_outputs=1)
-strategy = IncrementalFeatureSpaceStrategy(
-    model=model, optimizer=opt, policy=ExpansionPolicy(16, "zero")
+from sklearn.multiclass import OneVsRestClassifier
+from incremental_feature_cl import IncrementalFeatureMapModel
+
+# One binary task
+model = IncrementalFeatureMapModel(
+    new_feature_dim=16,
+    replay_mem_size=200,
+    random_state=0,
 )
-for i, exp in enumerate(benchmark.train_stream):
-    strategy.train(exp)
-    strategy.eval(benchmark.test_stream[: i + 1])
+model.fit(X, y)
+
+# A continual stream: the first call initialises the model;
+# every later partial_fit appends a zero-initialised feature block.
+model = IncrementalFeatureMapModel(new_feature_dim=16, random_state=0)
+model.partial_fit(X_exp0, y_exp0, classes=[0, 1])
+model.partial_fit(X_exp1, y_exp1)
+model.partial_fit(X_exp2, y_exp2)
+
+# Multiclass routing is supplied by scikit-learn.
+ovr = OneVsRestClassifier(IncrementalFeatureMapModel(new_feature_dim=16))
+ovr.fit(X_multiclass, y_multiclass)
 ```
 
-or attach `FeatureExpansionPlugin(policy)` to *any* Avalanche strategy (`Naive`, `Replay`, ...; tested).
-The plugin expands the model at the experience boundary and rebuilds the optimizer. The model is a plain
-`nn.Module` and has no Avalanche imports. Evaluate on `test_stream[: t+1]`. The model uses global class IDs, so the output head may already contain
-units for unseen IDs when a high global class ID is first encountered; those units are untrained. Avalanche's `nc_benchmark` (used for `SplitCIFAR100`) needs `n_classes % n_experiences == 0`;
-the built-in streams enforce the same divisibility rule.
+The model is binary by design. In the binary encoding, `classes_[1]` is the positive class. Scale features before fitting; the optimiser is minibatch SGD on weighted logistic loss.
 
-## Plots (`<run>/plots/`)
+## Training and replay semantics
 
-| File | Shows |
-| --- | --- |
-| A_accuracy_vs_experience | target accuracy (+negative acc, F1) or seen/all accuracy per experience |
-| B_accuracy_vs_class | accuracy of each class after the last experience (grey = unseen) |
-| C_class_accuracy_heatmap | rows = experience, columns = class, cell = class accuracy |
-| D_class_accuracy_curves | every class's accuracy over experiences (drops = forgetting) |
-| E_forgetting_vs_class | max previous accuracy - final accuracy per class |
-| F_feature_growth | feature dimensionality and parameter count per experience |
-| G_new_feature_utilization | `norm(W_k)` per block and mean `norm(W_new phi_new)` of the newest block |
-| H_expansion_probe | logit change caused by expansion (0 => invariant) and old-prediction agreement after expansion / training |
+- `fit(X, y)` resets model state and trains one stage without expansion.
+- The first `partial_fit` initialises the model without expansion; each later call appends `new_feature_dim` features before training.
+- `expand_features()` can append a block explicitly. Its classifier coefficients start at zero, so the decision scores must remain unchanged before further training.
+- `replay_mem_size=200` enables a bounded binary replay buffer by default. `replay_mem_size=0` disables replay; values of 1 are rejected because the buffer is split between the two binary labels.
+- `target_to_negatives` applies to the current batch before replay. It is a **target-samples-per-negative** ratio: `0.2` requests one target per five negatives, `1.0` requests a 1:1 ratio, and `None` keeps all negatives. If the requested ratio would discard every available negative, training raises an error rather than silently fitting a positive-only batch.
+- `pos_weight="balanced"` uses the negative-to-positive ratio when both labels occur in the current batch. Before both labels have appeared together it uses 1.0; afterwards it retains the last valid weight for one-label batches so replayed positives remain weighted.
 
-## Result files
+Replay memory is balanced between the binary target and non-target labels. This is **not equivalent** to a buffer balanced over the original multiclass IDs; comparisons with a multiclass replay baseline must state that distinction.
 
-`results.json` (config, environment incl. git commit/torch version, class order, per-experience records,
-summary), `metrics.csv`, `per_class_accuracy.csv`, `plots/*.png`. Per experience: feature/parameter counts, `new_parameters_this_experience`,
-`cumulative_added_parameters`, `new_feature_parameters`, `cumulative_added_feature_parameters`, expansion
-records (`old_feature_dim`, `new_feature_dim`, `number_of_new_parameters`, `old_parameter_count`,
-`total_parameter_count`), probe diagnostics, `n_train_samples` (and in target mode `n_train_target` / `n_train_negative`, the realized
-training ratio, plus the requested-vs-realized report described above), per-class accuracy, target metrics, block norms, and train time. `metrics.csv` has scalar
-columns only; nested records are flattened (`probe_*`, `feature_expansion_*`). Comparison runs add `comparison.csv/json/png`.
+## Research experiments (outside `src/`)
 
-## Invariants under test (`tests/`)
+These scripts are deliberately not part of the installed package API.
 
-Old predictions unchanged after zero expansion (also with BatchNorm backbones and repeated expansions) - new
-weights start at 0 - new weights become non-zero when needed - old parameters keep object identity and values -
-feature dim grows exactly as requested - output dim independent of feature dim (both orders commute) -
-target-vs-rest labels and streams (incl. the `target_to_negatives` ratio: None keeps the cumulative pool,
-exact 1:1 / 1:5 / 1:10 / 2:1 counts, targets never subsampled, deterministic and seed-dependent sampling,
-invalid ratios rejected, requested-vs-realized report; `compare_ratios`: `a:b` notation, aggregation, realized
-counts and shortfall reporting, resume (incl. what does / does not invalidate it), loss-weighting axis,
-`--resummarize`, target forgetting == standard forgetting, CSV/plot outputs) - no label leakage (forward takes only `x`; permuted labels give identical
-predictions; evaluation never mutates the model) - Avalanche integration on a tiny benchmark - Lecture-6
-maths (kernel identity, kernel == feature-space perceptron) - reproducibility, results format, plots.
+### Synthetic target-vs-rest stream
 
-## Known limitations
+```bash
+python -m experiments.run_target \
+  --dataset synthetic --target-class 0 --n-experiences 3 \
+  --new-feature-dim 8 --n-epochs 5 --replay-mem-size 200 \
+  --target-to-negatives 0.2 --seed 1 \
+  --output results/synthetic_target.json
+```
 
-* **CIFAR-100 remains an experiment, not a package self-test.** The repository contains the loader and
-  stream implementation, but no claim of CIFAR-100 performance is encoded in the package.
-* Expansion preserves old logits only at the instant of zero-initialised feature expansion; with trainable
-  old representation parameters, later optimisation can still forget. Freeze controls make the stability
-  choice explicit.
-* The Avalanche backend supports multiclass mode only and lacks the pre/post-expansion probes; iCaRL is not
-  wired (needs a feature-extractor/classifier split). No one-vs-rest ensemble, no adaptive `new_dim`, no kernel
-  expansion, no data augmentation in the built-in loaders.
-* The probe subset is drawn from the test set (inputs only) purely for diagnostics; it never influences training.
-* Replay in `training/replay.py` is intentionally simplistic; use Avalanche for real baselines.
-* Target-vs-rest streams hold every experience's training data in memory. The cumulative (`None`) stream for
-  CIFAR-100 with 20 experiences is ~1.6 GB as uint8 (5 exps ~0.5 GB); an explicit ratio such as 1:5 needs
-  ~0.2 GB. Experience subsampling uses `default_rng(seed + experience_index)`: deterministic, and kept this
-  way so earlier 1:5 results reproduce, but `(seed, i)` pairs with equal sums share a stream.
-* The requested ratio is an upper bound (see above): negatives are never duplicated, so very negative-heavy ratios
-  are not reached in early experiences when few negative classes have been seen. Judge a ratio by its
-  `final_*` metrics and `fraction_experiences_at_requested_ratio`, not by its label alone.
-* Resume compares the saved training config, not the software environment (torch version, git commit are recorded
-  in `results.json` but do not invalidate a run).
-* The ratio sweep reports mean/std across *targets*; it runs one seed. Repeat with other `--seed` values (and
-  distinct `--name`s) before reading small differences between ratios as real.
+### Digits target-vs-rest stream
+
+```bash
+python -m experiments.run_target \
+  --dataset digits --target-class 5 --n-experiences 5 \
+  --new-feature-dim 8 --n-epochs 5 --seed 1 \
+  --output results/digits_target.json
+```
+
+### CIFAR-100 target-vs-rest stream
+
+`--dataset` accepts a name (`digits`, `synthetic`, `cifar100`), the path of an extracted CIFAR-100 directory, or a local CIFAR-100 tar archive. An extracted directory can itself contain `train` and `test`, or contain a `cifar-100-python/` subdirectory with those files; a path implies `cifar100`, so there is no separate data-directory flag.
+
+```bash
+# extracted copy or local archive on disk
+python -m experiments.run_target \
+  --dataset /path/to/cifar-100-python \
+  --target-class 17 --n-experiences 20 \
+  --new-feature-dim 16 --n-epochs 5 --seed 1 \
+  --output results/cifar100_target.json
+
+python -m experiments.run_target \
+  --dataset /data/cifar-100-python.tar.gz \
+  --target-class 17 --n-experiences 20
+
+# or the checksum-verified download/cache
+python -m experiments.run_target --dataset cifar100 --target-class 17 --n-experiences 20
+```
+
+This deliberately uses a deterministic subset of flattened raw pixels, not a learned image backbone. Treat it as an exploratory binary baseline; it is not directly comparable to the earlier PyTorch/Avalanche experiments that used a different model and training pipeline.
+
+The underlying class stream introduces a disjoint group of classes at each experience. By default, the experiment also includes the target-class training examples in every experience (`--target-every-experience`), matching a target-versus-rest task in which positive examples remain available while new negative classes arrive. The target examples are reused from the training split only; held-out test data is never added to training. Their replay-memory reservoir is retained from first exposure rather than repeatedly inserting duplicate copies of the same images. Use `--no-target-every-experience` for the stricter setting where the target class appears only in its original class group and later experiences can contain only negatives. The output distinguishes `classes_arriving`, `classes_in_training_batch`, `natural_target_arrival_experience`, and `first_training_exposure_experience`; repeated target exposure means these are not necessarily the same experience. These modes answer different continual-learning questions and must not be compared without noting the mode. The script reserves a stratified validation subset from the training split (20%, with at least one validation example per class). At each experience, threshold calibration uses only validation examples whose original class labels have already been observed in the training stream through that experience; validation labels from future classes are excluded. This cumulative seen-class scope lets strict class-once mode calibrate after the target has arrived, using target and previously seen negative classes, without requiring target samples in every later training batch. In strict class-once mode, no threshold is reported before the target has arrived, and calibration waits until the permitted validation subset contains both target and negative examples. The `threshold_calibration` record recalibrates at each experience when valid; the `fixed_threshold_calibration` record freezes the first valid threshold and records its exact `calibration_experience` and `validation_classes`. Those calibration metrics use validation data only; full held-out test metrics are for evaluation only and never select thresholds. The output also reports metrics at threshold zero and ROC AUC on the full held-out test set. Threshold ties are resolved by choosing the cutoff closest to zero, then the smaller cutoff. Read all operating points alongside ROC AUC: if AUC stays stable while fixed-threshold recall/specificity shift, scores are drifting relative to the frozen cutoff; if AUC falls, ranking/separation is degrading. These small datasets are smoke tests—not evidence of performance on CIFAR-100 or a substitute for a multi-seed benchmark.
+
+### Compare target:negative ratios across seeds
+
+```bash
+python -m experiments.compare_ratios \
+  --dataset digits --target-class 5 --n-experiences 5 \
+  --seeds 0 1 2 3 4 --include-all-negatives \
+  --output results/ratio_comparison.json
+
+python -m experiments.plot_results \
+  --results results/ratio_comparison.json --output-dir results/ratio_plots
+```
+
+### Compare replay off versus bounded memory
+
+```bash
+python -m experiments.compare_replay \
+  --dataset digits --target-class 5 --n-experiences 5 \
+  --seeds 0 1 2 3 4 --replay-sizes 0 200 \
+  --output results/replay_comparison.json
+
+python -m experiments.plot_results \
+  --results results/replay_comparison.json --output-dir results/replay_plots
+```
+
+The run history reports target-recall diagnostics at threshold zero. `target_recall_forgetting` is the drop from the **best** recall seen since the target was first included in training; the maximum over a noisy series is biased upward, so a single lucky spike inflates it. `target_recall_change_since_arrival` compares with recall at the first training exposure (also reported as `target_recall_at_first_training_exposure`). The recall at the natural class-stream arrival is reported separately as `target_recall_at_natural_class_arrival`; these differ when `--target-every-experience` is enabled. Read them together with `roc_auc`. If AUC is steady while recall and specificity move in opposite directions, the zero threshold is drifting along a stable ranking; that is not loss of target knowledge. Both are one-target diagnostics, not the conventional average forgetting across a multiclass benchmark. With 20 test images per class, one recall reading has a granularity of 0.05.
+
+`--replay-pos-weight current` (the default) reuses the retained positive weight for replayed targets; `uniform` gives them weight 1. On a synthetic raw-pixel stand-in it raised balanced accuracy over `uniform` by moving the operating point (higher recall, lower specificity) without changing ROC AUC, and it did not reduce the recall swing across experiences.
+
+**Replay memory size with scarce targets.** The buffer is split evenly between the two labels, but a label can only fill its half if enough unique samples have arrived. With 100 target images in the loaded training subset, reserving 20% for validation leaves 80 unique target fitting images. A memory of 1000 can therefore hold 80 targets and 500 negatives even when target examples are included in every experience; the experiment runner does not repeatedly insert copies of those same target images into the positive reservoir. On the synthetic stand-in, that configuration lowered balanced accuracy by 0.048 ± 0.006 compared with a memory of 200. Check `last_fit_diagnostics_["memory_target"]` against `["memory_negative"]` when changing `replay_mem_size`.
+
+**Step size and input scale.** `learning_rate_init=0.01` is plain SGD, so it interacts with the squared input norm. Flattened 32x32x3 pixels have `||x||^2` of about 850 in [0, 1] and about 3072 once standardised per pixel; on the synthetic stand-in, standardising at 0.01 was worse than raw pixels, and a smaller step (for example 0.001) was needed for the larger norm. Treat `learning_rate_init` and the feature scale as one setting.
+
+### Plot a saved run and verify the mathematical reference
+
+```bash
+python -m experiments.plot_results \
+  --results results/digits_target.json --output-dir results/digits_plots
+python -m experiments.math_reference
+```
+
+The math reference checks zero-initialised expansion invariance and the explicit degree-two polynomial feature identity. Plotting reads saved JSON; it does not retrain the estimator.
+
+## What the experiments do and do not establish
+
+The tests cover the estimator API, deterministic behaviour, finite-difference gradient checks, zero-initialised expansion, replay, target/negative sampling, chunked inference, divergence and class-consistency errors, the small experiment pipeline, and the continual-learning evaluation (metrics against hand calculations, memory accounting and the verdict logic). A gradient check verifies that the implementation's gradients match its implemented loss; it does not establish parity with the previous PyTorch or scikit-learn implementation.
+
+Do not compare results without recording the seed, experience construction, target class, ratio, replay capacity, training settings, and evaluation metric. In particular, zero-initialised expansion guarantees score continuity only at the expansion boundary; subsequent optimisation can still alter old predictions.
+
+## Experiment notes
+
+- `--target-every-experience` re-trains on the target only in experiences *after* its natural
+  arrival. If the target arrives in the last experience the flag has no effect; the runner warns
+  and records `target_reintroduction_effective: false`.
+- Reintroduced target rows are trained on but not stored again: `partial_fit(...,
+  store_in_memory=mask)` keeps repeated copies from crowding the replay reservoir.
+- Each history entry separates current-batch counts (`n_target_natural`, `n_target_injected`,
+  `fit_diagnostics.current_*`) from replay counts (`fit_diagnostics.replay_*`) and memory changes
+  (`memory_*_added`).
+- `decision_function` accepts `float32` input and converts it chunk by chunk, so
+  `inference_batch_size` also bounds input-preparation memory.
+
+## Evidence of continual learning
+
+`python -m experiments.continual_eval --dataset digits` runs a class-incremental stream (every
+class arrives once, class order shuffled per seed) for four methods on identical seeds:
+
+- `naive`: no replay.
+- `replay`: the package default.
+- `joint`: one offline fit on all data, no feature expansion.
+- `joint_matched`: offline, class-mixed training with the same expansion schedule and the same
+  total training exposure as the stream: the rows are split at random into one stage per
+  experience, so every row is presented `n_epochs` times in total (any remainder is handled by
+  `np.array_split`). Its minibatches are class-mixed, whereas the stream methods only ever see
+  the classes of the current experience; that difference is intended, and it is the only one in
+  training exposure and capacity.
+
+The two offline methods are trained on all classes at once, so they have no arrival order: they
+report final metrics only, and values defined by arrival (at arrival, incremental, forgetting,
+backward transfer) are shown as `n/a`. In the plots they appear as horizontal reference lines.
+
+**Training budget.** Each method's training exposure is reported per class model: the current
+samples presented to the optimiser (equal for all four methods, `n_epochs` x training rows) and,
+for `replay`, the extra replayed samples (about 60% more on the datasets below). A test counts
+rows and gradient updates at the optimiser's gradient computation, independently of the reported
+figures. Replay appends its replayed samples to each current minibatch, so it processes more
+sample presentations than `naive` while performing the same number of gradient updates for the
+same current-data minibatches; its updates are more expensive because each batch is larger. As a
+control for the extra presentations, `naive` with 8 or 10 epochs instead of 5 (more updates and
+more presentations) did not improve (final recall 0.57 and 0.56 on `digits`, 0.33 and 0.32 on
+`synthetic`, against 0.56 and 0.36 at 5 epochs), so the replay advantage is not explained by
+simply training naive for longer.
+
+After each experience it scores every class seen so far and reports, per class, **recall**,
+**specificity**, **accuracy** (arg-max over seen classes) and **AUC**, summarised as final value,
+value at arrival, average incremental value, forgetting and backward transfer. Recall is never
+read alone: specificity and balanced accuracy show whether recall was bought by over-predicting
+the class, and AUC separates threshold drift from loss of ranking information.
+
+**Memory accounting.** `OneVsRestClassifier` gives every class its own replay memory, so total
+memory is `replay_mem_size x n_classes`, not `replay_mem_size`. The evaluation therefore sets
+the budget as a share of the training set (`--memory-fraction`, default 0.25), derives the
+per-class-model size from it, and reports the rows actually retained. `--replay-mem-size` sets
+the per-class-model size directly. A gating criterion requires replay to retain less than the
+whole training set. With the earlier per-model size of 200 on `digits`, replay held 2,000 rows
+from 1,347 training rows, so that setting does not demonstrate bounded memory.
+
+**Verdict.** `replay` is compared with `naive` on paired per-seed differences with a 95%
+Student-t interval. Gating criteria: lower recall forgetting, higher final recall, higher final
+accuracy, higher final balanced accuracy, balanced accuracy at arrival not worse than
+`--plasticity-margin` (default 0.05), final balanced accuracy within `--joint-margin` (default
+0.15) of `joint`, and replay retaining less than the training set. Recall and AUC at arrival and
+the gap to `joint_matched` are reported as non-gating rows. `--fail-on-verdict` makes the command
+exit 1 if a gating criterion fails; CI runs it on `digits`.
+
+### Running it with plots
+
+```bash
+python -m pip install -e ".[dev,experiments]"      # experiments extra installs matplotlib
+
+# 1. run the evaluation (saves the JSON, prints the tables and the verdict)
+python -m experiments.continual_eval --dataset digits --output results/continual_eval_digits.json
+
+# 2. plot the saved JSON; this does not retrain anything
+python -m experiments.plot_results \
+  --results results/continual_eval_digits.json --output-dir results/continual_plots
+```
+
+Plots written to `--output-dir`: `recall_over_experiences.png` and `accuracy_over_experiences.png`
+(mean over classes seen so far, mean and standard deviation over seeds, all methods),
+`recall_matrix_naive.png` and `recall_matrix_replay.png` (recall of each arrival group after each
+experience; values below the diagonal are forgetting), and `summary_bars.png` (final recall,
+specificity, accuracy and recall forgetting per method). Use `--dataset synthetic` for the
+harder stream, `--seeds 0 1 2 3 4 5 6 7` for tighter intervals, or `--memory-fraction 0.1` to
+shrink the replay budget.
+
+Specificity and AUC at each experience use only rows of classes seen so far as negatives; classes
+that have not arrived yet are never scored. Results of the command above (full JSON in `results/`):
+
+### `digits` (5 seeds, 5 experiences)
+
+| metric | naive | replay | joint | joint_matched |
+| --- | --- | --- | --- | --- |
+| final recall | 0.557 ± 0.058 | 0.935 ± 0.009 | 0.981 ± 0.003 | 0.970 ± 0.005 |
+| final specificity | 0.955 ± 0.007 | 0.972 ± 0.005 | 0.960 ± 0.003 | 0.975 ± 0.002 |
+| final accuracy | 0.561 ± 0.033 | 0.914 ± 0.010 | 0.956 ± 0.009 | 0.949 ± 0.007 |
+| final AUC | 0.893 ± 0.014 | 0.989 ± 0.001 | 0.995 ± 0.001 | 0.995 ± 0.001 |
+| recall at arrival | 0.983 ± 0.004 | 0.974 ± 0.007 | n/a | n/a |
+| recall forgetting | 0.533 ± 0.071 | 0.051 ± 0.008 | n/a | n/a |
+| recall backward transfer | -0.533 ± 0.071 | -0.049 ± 0.009 | n/a | n/a |
+| accuracy forgetting | 0.531 ± 0.039 | 0.083 ± 0.012 | n/a | n/a |
+| avg incremental recall | 0.798 ± 0.025 | 0.960 ± 0.017 | n/a | n/a |
+| avg incremental accuracy | 0.767 ± 0.039 | 0.948 ± 0.020 | n/a | n/a |
+| current-sample presentations / class model | 6735.000 ± 0.000 | 6735.000 ± 0.000 | 6735.000 ± 0.000 | 6735.000 ± 0.000 |
+| replayed-sample presentations / class model | 0.000 ± 0.000 | 4110.600 ± 17.228 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| rows retained (all class models) | 0.000 ± 0.000 | 320.000 ± 0.000 | 1347.000 ± 0.000 | 1347.000 ± 0.000 |
+| fraction of training set retained | 0.000 ± 0.000 | 0.238 ± 0.000 | 1.000 ± 0.000 | 1.000 ± 0.000 |
+
+| criterion (replay vs naive, paired) | mean diff | 95% CI | passed |
+| --- | --- | --- | --- |
+| retention_recall_forgetting_lower_than_naive | -0.482 | [-0.575, -0.390] | yes |
+| final_recall_higher_than_naive | +0.378 | [+0.308, +0.448] | yes |
+| final_accuracy_higher_than_naive | +0.353 | [+0.321, +0.385] | yes |
+| recall_not_bought_with_specificity | +0.197 | [+0.164, +0.231] | yes |
+| still_learns_new_classes | +0.031 | [+0.021, +0.040] | yes |
+| info_recall_at_arrival (not gating) | -0.009 | [-0.014, -0.004] | yes |
+| info_auc_at_arrival (not gating) | +0.006 | [+0.004, +0.008] | yes |
+| replay_stores_less_than_the_training_set | +0.238 | [+0.238, +0.238] | yes |
+| info_gap_to_capacity_matched_joint (not gating) | +0.020 | [+0.014, +0.025] | yes |
+| within_margin_of_joint_training | +0.017 | [+0.013, +0.022] | yes |
+
+All gating criteria passed: True
+
+### `synthetic` (5 seeds, 5 experiences)
+
+| metric | naive | replay | joint | joint_matched |
+| --- | --- | --- | --- | --- |
+| final recall | 0.358 ± 0.056 | 0.756 ± 0.036 | 0.928 ± 0.022 | 0.904 ± 0.020 |
+| final specificity | 0.908 ± 0.007 | 0.927 ± 0.007 | 0.873 ± 0.014 | 0.899 ± 0.015 |
+| final accuracy | 0.375 ± 0.049 | 0.748 ± 0.021 | 0.812 ± 0.028 | 0.814 ± 0.030 |
+| final AUC | 0.872 ± 0.022 | 0.945 ± 0.010 | 0.958 ± 0.010 | 0.959 ± 0.012 |
+| recall at arrival | 0.980 ± 0.007 | 0.932 ± 0.021 | n/a | n/a |
+| recall forgetting | 0.746 ± 0.067 | 0.211 ± 0.034 | n/a | n/a |
+| recall backward transfer | -0.746 ± 0.067 | -0.211 ± 0.034 | n/a | n/a |
+| accuracy forgetting | 0.731 ± 0.057 | 0.235 ± 0.019 | n/a | n/a |
+| avg incremental recall | 0.624 ± 0.027 | 0.844 ± 0.013 | n/a | n/a |
+| avg incremental accuracy | 0.640 ± 0.022 | 0.854 ± 0.012 | n/a | n/a |
+| current-sample presentations / class model | 9000.000 ± 0.000 | 9000.000 ± 0.000 | 9000.000 ± 0.000 | 9000.000 ± 0.000 |
+| replayed-sample presentations / class model | 0.000 ± 0.000 | 5998.000 ± 11.511 | 0.000 ± 0.000 | 0.000 ± 0.000 |
+| rows retained (all class models) | 0.000 ± 0.000 | 444.000 ± 0.000 | 1800.000 ± 0.000 | 1800.000 ± 0.000 |
+| fraction of training set retained | 0.000 ± 0.000 | 0.247 ± 0.000 | 1.000 ± 0.000 | 1.000 ± 0.000 |
+
+| criterion (replay vs naive, paired) | mean diff | 95% CI | passed |
+| --- | --- | --- | --- |
+| retention_recall_forgetting_lower_than_naive | -0.535 | [-0.626, -0.445] | yes |
+| final_recall_higher_than_naive | +0.398 | [+0.336, +0.461] | yes |
+| final_accuracy_higher_than_naive | +0.374 | [+0.332, +0.416] | yes |
+| recall_not_bought_with_specificity | +0.208 | [+0.179, +0.238] | yes |
+| still_learns_new_classes | +0.040 | [+0.025, +0.055] | yes |
+| info_recall_at_arrival (not gating) | -0.048 | [-0.068, -0.028] | NO |
+| info_auc_at_arrival (not gating) | +0.001 | [-0.002, +0.004] | yes |
+| replay_stores_less_than_the_training_set | +0.247 | [+0.247, +0.247] | yes |
+| info_gap_to_capacity_matched_joint (not gating) | +0.060 | [+0.041, +0.080] | yes |
+| within_margin_of_joint_training | +0.059 | [+0.045, +0.074] | yes |
+
+All gating criteria passed: True
+
+How to read these results:
+
+- Replay retains what naive training loses (recall forgetting 0.05 vs 0.53 on `digits`, 0.21 vs
+  0.75 on `synthetic`) without giving up specificity, while keeping about a quarter of the
+  training rows.
+- Retention is incomplete on the harder `synthetic` stream: final recall is 0.76 against 0.90 for
+  budget-matched joint training. The remaining gap to `joint_matched` is 0.02 balanced accuracy
+  on `digits` and 0.06 on `synthetic`. Reducing the memory budget degrades results gradually; on
+  `digits`, 15% retained gave final recall about 0.91 and 7% about 0.83.
+- Replay's recall at arrival is below naive's on `synthetic` (about -0.05), but naive reaches
+  its higher arrival recall with lower specificity (0.78 vs 0.91). Plasticity is therefore
+  gated on balanced accuracy, not raw recall; AUC at arrival is equal for the two methods.
+- Both datasets are small and low-dimensional, and the intervals cover 5 seeds. These results do
+  not show the same behaviour on real CIFAR-100; run
+  `--dataset cifar100 --max-classes 20 --seeds 0 1 2` (or pass a CIFAR directory path) before
+  making that claim.
+
+## Behaviour notes
+
+- Training that produces non-finite parameters raises `ValueError`. A finite but poor run (a
+  learning rate too high for the input scale) is not detected.
+- A later `partial_fit(..., classes=...)` that differs from the first call raises `ValueError`.
+- `OneVsRestClassifier` clones the estimator with the same integer `random_state`, so all class
+  models share the same random feature blocks. Use `random_state=None` to decorrelate them.
+- Supported minimums (Python 3.10, NumPy 1.24, SciPy 1.10, scikit-learn 1.6) are tested in CI;
+  the package uses scikit-learn internals, so newer scikit-learn releases should be checked.
