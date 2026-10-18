@@ -62,6 +62,7 @@ def run_experiment(
     train_blocks: bool = True,
     replay_pos_weight: str = "current",
     target_every_experience: bool = True,
+    inference_batch_size: int = 256,
 ) -> dict:
     if n_experiences < 1:
         raise ValueError("n_experiences must be at least 1.")
@@ -100,6 +101,7 @@ def run_experiment(
         target_to_negatives=target_to_negatives,
         train_blocks=train_blocks,
         replay_pos_weight=replay_pos_weight,
+        inference_batch_size=inference_batch_size,
         random_state=seed,
     )
     history = []
@@ -355,6 +357,7 @@ def run_experiment(
         "replay_mem_size": int(replay_mem_size),
         "target_to_negatives": target_to_negatives,
         "replay_pos_weight": replay_pos_weight,
+        "inference_batch_size": int(inference_batch_size),
         "target_every_experience": bool(target_every_experience),
         "train_blocks": bool(train_blocks),
         "history": history,
@@ -394,6 +397,12 @@ def main() -> None:
     parser.add_argument("--new-feature-dim", type=int, default=8)
     parser.add_argument("--n-epochs", type=int, default=5)
     parser.add_argument("--replay-mem-size", type=int, default=200)
+    parser.add_argument(
+        "--inference-batch-size",
+        type=int,
+        default=256,
+        help="Rows transformed per inference batch; lower values reduce temporary memory use.",
+    )
     parser.add_argument(
         "--target-to-negatives",
         type=float,
@@ -439,6 +448,7 @@ def main() -> None:
         train_blocks=not args.fixed_blocks,
         replay_pos_weight=args.replay_pos_weight,
         target_every_experience=args.target_every_experience,
+        inference_batch_size=args.inference_batch_size,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
