@@ -119,3 +119,39 @@ def test_verdict_fails_when_replay_stores_the_whole_training_set():
     out = ce.verdict(runs, plasticity_margin=0.05, joint_margin=0.15)
     assert out["replay_stores_less_than_the_training_set"]["passed"] is False
     assert out["all_passed"] is False
+
+
+def test_negatives_come_only_from_seen_classes():
+    class Stub:
+        classes_ = np.array([0, 1, 2])
+
+        def decision_function(self, X):
+            # class 0 fires on rows of class 0 and (wrongly) on every row of the unseen class 2
+            y = X[:, 0]
+            return np.column_stack(
+                [
+                    np.where((y == 0) | (y == 2), 1.0, -1.0),
+                    np.where(y == 1, 1.0, -1.0),
+                    -np.ones(len(y)),
+                ]
+            )
+
+    y = np.repeat([0, 1, 2], 10)
+    X = y[:, None].astype(float)
+    out = ce._evaluate(Stub(), X, y, seen=[0, 1])
+    assert out[0]["specificity"] == 1.0  # the unseen class-2 rows must not count as negatives
+    assert out[0]["auc"] == 1.0
+    assert out[0]["recall"] == 1.0
+
+
+def test_no_seen_negatives_gives_nan_not_an_error():
+    class Stub:
+        classes_ = np.array([0, 1])
+
+        def decision_function(self, X):
+            return np.column_stack([np.ones(len(X)), -np.ones(len(X))])
+
+    y = np.repeat([0, 1], 5)
+    out = ce._evaluate(Stub(), y[:, None].astype(float), y, seen=[0])
+    assert out[0]["recall"] == 1.0
+    assert np.isnan(out[0]["specificity"]) and np.isnan(out[0]["auc"])

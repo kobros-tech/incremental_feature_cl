@@ -3,6 +3,7 @@ __pycache__/
 data/
 results/*
 !results/.gitkeep
+!results/continual_eval_*.json
 .pytest_cache/
 .ruff_cache/
 !src/incremental_feature_cl/data

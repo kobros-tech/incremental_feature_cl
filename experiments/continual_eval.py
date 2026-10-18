@@ -8,9 +8,9 @@ matrices indexed ``[experience, class]``:
 
 * recall ``R``      - fraction of class ``c`` test rows scored >= 0 by class ``c``'s binary model
 * accuracy ``P``    - fraction of class ``c`` test rows whose arg-max over the *seen* classes is ``c``
-* specificity ``S`` - fraction of other-class rows scored < 0 (stops recall being bought by
-  predicting "target" everywhere)
-* AUC ``U``         - threshold-free ranking quality, so threshold drift can be told apart from
+* specificity ``S`` - fraction of other *seen*-class rows scored < 0 (stops recall being bought
+  by predicting "target" everywhere); classes that have not arrived are never used as negatives
+* AUC ``U``         - threshold-free ranking quality against the same seen-class negatives, so threshold drift can be told apart from
   genuine loss of information
 
 Four methods are compared on the same data and seeds: ``naive`` (no replay), ``replay`` (the
@@ -67,12 +67,15 @@ def _evaluate(model, X_test, y_test, seen: list[int]) -> dict[int, dict[str, flo
     for c in seen:
         s = scores[:, col[c]]
         is_c = y_test == c
-        others = ~is_c
+        # Negatives are rows of *other seen* classes only: counting classes that have not
+        # arrived yet would score the model on data it could not have learned from.
+        others = in_seen & ~is_c
+        mask = is_c | others
         out[c] = {
             "recall": float(np.mean(s[is_c] >= 0.0)),
             "accuracy": float(np.mean(pred[is_c & in_seen] == c)),
-            "specificity": float(np.mean(s[others] < 0.0)),
-            "auc": float(roc_auc_score(is_c, s)),
+            "specificity": float(np.mean(s[others] < 0.0)) if others.any() else float("nan"),
+            "auc": float(roc_auc_score(is_c[mask], s[mask])) if others.any() else float("nan"),
         }
     return out
 
@@ -161,11 +164,11 @@ def summarise(metrics, arrival: dict[int, int], n_experiences: int) -> dict[str,
     old = [c for c, a in arrival.items() if a < last]  # classes that had time to be forgotten
     out: dict[str, float] = {}
     for key in ("recall", "accuracy", "specificity", "auc"):
-        out[f"final_{key}"] = float(np.mean([final[c][key] for c in final]))
+        out[f"final_{key}"] = float(np.nanmean([final[c][key] for c in final]))
         out[f"average_incremental_{key}"] = float(
-            np.mean([np.mean([m[key] for m in step.values()]) for step in metrics])
+            np.nanmean([np.nanmean([m[key] for m in step.values()]) for step in metrics])
         )
-        out[f"{key}_at_arrival"] = float(np.mean([metrics[arrival[c]][c][key] for c in arrival]))
+        out[f"{key}_at_arrival"] = float(np.nanmean([metrics[arrival[c]][c][key] for c in arrival]))
     out["final_balanced_accuracy"] = (out["final_recall"] + out["final_specificity"]) / 2
     out["balanced_accuracy_at_arrival"] = (
         out["recall_at_arrival"] + out["specificity_at_arrival"]
@@ -178,8 +181,8 @@ def summarise(metrics, arrival: dict[int, int], n_experiences: int) -> dict[str,
                 for c in old
             ]
             changes = [final[c][key] - metrics[arrival[c]][c][key] for c in old]
-            out[f"{key}_forgetting"] = float(np.mean(drops))
-            out[f"{key}_backward_transfer"] = float(np.mean(changes))
+            out[f"{key}_forgetting"] = float(np.nanmean(drops))
+            out[f"{key}_backward_transfer"] = float(np.nanmean(changes))
         else:
             out[f"{key}_forgetting"] = out[f"{key}_backward_transfer"] = float("nan")
     return out

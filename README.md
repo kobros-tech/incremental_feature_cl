@@ -222,7 +222,8 @@ specificity, accuracy and recall forgetting per method). Use `--dataset syntheti
 harder stream, `--seeds 0 1 2 3 4 5 6 7` for tighter intervals, or `--memory-fraction 0.1` to
 shrink the replay budget.
 
-Results of the command above (full JSON in `results/`):
+Specificity and AUC at each experience use only rows of classes seen so far as negatives; classes
+that have not arrived yet are never scored. Results of the command above (full JSON in `results/`):
 
 ### `digits` (5 seeds, 5 experiences)
 
@@ -247,9 +248,9 @@ Results of the command above (full JSON in `results/`):
 | final_recall_higher_than_naive | +0.378 | [+0.308, +0.448] | yes |
 | final_accuracy_higher_than_naive | +0.353 | [+0.321, +0.385] | yes |
 | recall_not_bought_with_specificity | +0.197 | [+0.164, +0.231] | yes |
-| still_learns_new_classes | +0.021 | [+0.014, +0.029] | yes |
+| still_learns_new_classes | +0.031 | [+0.021, +0.040] | yes |
 | info_recall_at_arrival (not gating) | -0.009 | [-0.014, -0.004] | yes |
-| info_auc_at_arrival (not gating) | +0.002 | [-0.002, +0.006] | yes |
+| info_auc_at_arrival (not gating) | +0.006 | [+0.004, +0.008] | yes |
 | replay_stores_less_than_the_training_set | +0.238 | [+0.238, +0.238] | yes |
 | info_gap_to_capacity_matched_joint (not gating) | +0.029 | [+0.024, +0.034] | yes |
 | within_margin_of_joint_training | +0.017 | [+0.013, +0.022] | yes |
@@ -279,9 +280,9 @@ All gating criteria passed: True
 | final_recall_higher_than_naive | +0.398 | [+0.336, +0.461] | yes |
 | final_accuracy_higher_than_naive | +0.374 | [+0.332, +0.416] | yes |
 | recall_not_bought_with_specificity | +0.208 | [+0.179, +0.238] | yes |
-| still_learns_new_classes | +0.031 | [+0.022, +0.041] | yes |
+| still_learns_new_classes | +0.040 | [+0.025, +0.055] | yes |
 | info_recall_at_arrival (not gating) | -0.048 | [-0.068, -0.028] | NO |
-| info_auc_at_arrival (not gating) | -0.011 | [-0.018, -0.005] | yes |
+| info_auc_at_arrival (not gating) | +0.001 | [-0.002, +0.004] | yes |
 | replay_stores_less_than_the_training_set | +0.247 | [+0.247, +0.247] | yes |
 | info_gap_to_capacity_matched_joint (not gating) | +0.114 | [+0.100, +0.128] | yes |
 | within_margin_of_joint_training | +0.059 | [+0.045, +0.074] | yes |
@@ -290,14 +291,16 @@ All gating criteria passed: True
 
 How to read these results:
 
-- Replay retains what naive training loses (recall forgetting 0.05 vs 0.53 on `digits`) without
-  giving up specificity, while keeping about a quarter of the training rows.
-- Retention is incomplete on the harder `synthetic` stream, and replay trails capacity-matched
-  joint training (the `info_gap_to_capacity_matched_joint` row). Reducing the budget degrades
-  results gradually; on `digits`, 15% retained gave final recall about 0.91 and 7% about 0.83.
-- Replay costs some plasticity. On `synthetic` its recall at arrival is below naive's (about
-  -0.05), because naive's higher arrival recall comes with much lower specificity. Plasticity is
-  therefore gated on balanced accuracy, not raw recall.
+- Replay retains what naive training loses (recall forgetting 0.05 vs 0.53 on `digits`, 0.21 vs
+  0.75 on `synthetic`) without giving up specificity, while keeping about a quarter of the
+  training rows.
+- Retention is incomplete on the harder `synthetic` stream: final recall is 0.76 against 0.95 for
+  capacity-matched joint training (the `info_gap_to_capacity_matched_joint` row). Reducing the
+  budget degrades results gradually; on `digits`, 15% retained gave final recall about 0.91 and
+  7% about 0.83.
+- Replay's recall at arrival is below naive's on `synthetic` (about -0.05), but naive reaches
+  its higher arrival recall with lower specificity (0.78 vs 0.91). Plasticity is therefore
+  gated on balanced accuracy, not raw recall; AUC at arrival is equal for the two methods.
 - Both datasets are small and low-dimensional, and the intervals cover 5 seeds. These results do
   not show the same behaviour on real CIFAR-100; run
   `--dataset cifar100 --max-classes 20 --seeds 0 1 2` (or pass a CIFAR directory path) before
